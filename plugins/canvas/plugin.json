@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "canvas",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Your own Claude or Codex builds your app with you on your agent.cloud canvas: it tries versions that differ on purpose, asks you at the forks that matter, and shows each one live.",
   "author": {
     "name": "agent.cloud"
