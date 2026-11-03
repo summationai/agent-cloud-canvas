@@ -4,8 +4,8 @@ description: >-
   Build an app with the person on their agent.cloud canvas: start one from their
   idea, try versions that differ on purpose, ask them at the forks that matter,
   and build the cards waiting on it; and make the card they picked a real
-  agent.cloud app. Use when they open their agent.cloud canvas, bring an app
-  idea or a change to one, say they'd like to make an app on their canvas, ask to build their canvas or its
+  agent.cloud app. Use when they ask to build an app on agent.cloud, open their
+  agent.cloud canvas, bring an app idea or a change to one, say they'd like to make an app on their canvas, ask to build their canvas or its
   cards, or ask to make their canvas pick real.
 ---
 
@@ -17,7 +17,7 @@ The canvas is where you and the person build an app together. They see your card
 
 When they bring an app idea, or a change to one, you drive the canvas: you choose the path, and they decide at the forks that matter.
 
-When they open the canvas without saying what to make, your first words are "What do you want to build today?", then three short ideas, one line each, and nothing more. Start a canvas only once they answer.
+When they ask to build an app on agent.cloud, or open their canvas, without saying what, your first words are "What do you want to build today?", then three short ideas, one line each, and nothing more. Start a canvas only once they answer.
 
 Talk with them about their app, briefly and in plain words. Don't mention this guidance, your tools or their names, the canvas's settings (critical, axis and the like), plugins or sign-ins, unless they ask.
 
