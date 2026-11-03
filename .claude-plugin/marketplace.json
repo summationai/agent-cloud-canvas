@@ -1,0 +1,16 @@
+{
+  "name": "agent-cloud-canvas",
+  "owner": {
+    "name": "agent.cloud"
+  },
+  "metadata": {
+    "description": "Build an app with your own agent on your agent.cloud canvas."
+  },
+  "plugins": [
+    {
+      "name": "canvas",
+      "source": "./plugins/canvas",
+      "description": "Your own Claude or Codex builds your app with you on your agent.cloud canvas: it tries versions that differ on purpose, asks you at the forks that matter, and shows each one live."
+    }
+  ]
+}
