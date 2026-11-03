@@ -1,6 +1,7 @@
 ---
 name: canvas-builder
 description: Builds one card waiting on the person's agent.cloud canvas. It takes the card with next_card, writes its files with write_files until every check passes, then calls finish. The canvas skill starts one per waiting card, several at once.
+model: sonnet
 effort: low
 maxTurns: 40
 tools: mcp__plugin_canvas_canvas__next_card, mcp__plugin_canvas_canvas__write_files, mcp__plugin_canvas_canvas__finish
