@@ -1,0 +1,22 @@
+{
+  "name": "canvas-e2e",
+  "version": "0.1.2",
+  "description": "Test build of the agent.cloud canvas plugin, for canvas-e2e.agent.cloud. Your own Claude or Codex builds your app with you on your agent.cloud canvas: it tries versions that differ on purpose, asks you at the forks that matter, and shows each one live.",
+  "author": {
+    "name": "agent.cloud"
+  },
+  "homepage": "https://agent.cloud",
+  "repository": "https://github.com/summationai/agent-cloud-canvas",
+  "keywords": [
+    "agent-cloud",
+    "canvas",
+    "app",
+    "prototype"
+  ],
+  "license": "Apache-2.0",
+  "displayName": "agent.cloud canvas (test)",
+  "supportUrl": "https://agent.cloud/support",
+  "privacyPolicyUrl": "https://agent.cloud/privacy",
+  "termsOfServiceUrl": "https://agent.cloud/terms",
+  "icon": "./assets/icon.png"
+}
