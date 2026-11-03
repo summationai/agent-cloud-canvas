@@ -11,6 +11,11 @@
       "name": "canvas",
       "source": "./plugins/canvas",
       "description": "Your own Claude or Codex builds your app with you on your agent.cloud canvas: it tries versions that differ on purpose, asks you at the forks that matter, and shows each one live."
+    },
+    {
+      "name": "canvas-e2e",
+      "source": "./plugins/canvas-e2e",
+      "description": "Test build, for canvas-e2e.agent.cloud. Your own Claude or Codex builds your app with you on your agent.cloud canvas: it tries versions that differ on purpose, asks you at the forks that matter, and shows each one live."
     }
   ]
 }
