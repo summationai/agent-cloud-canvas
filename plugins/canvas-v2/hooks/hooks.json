@@ -1,0 +1,17 @@
+{
+  "description": "Brings your canvas back when Claude starts, so the apps on it show at once. Quiet; does nothing until you've used /canvas once.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$HOME/.canvas/config.json\" ] && [ -f \"$HOME/.canvas/helper.mjs\" ] && command -v node >/dev/null 2>&1 && node \"$HOME/.canvas/helper.mjs\" up >/dev/null 2>&1; exit 0",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
