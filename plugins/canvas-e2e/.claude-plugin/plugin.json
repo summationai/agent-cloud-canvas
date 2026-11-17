@@ -1,6 +1,6 @@
 {
   "name": "canvas-e2e",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Test build of the agent.cloud canvas plugin, for canvas-e2e.agent.cloud. Your own Claude or Codex builds your app with you on your agent.cloud canvas: it tries versions that differ on purpose, asks you at the forks that matter, and shows each one live.",
   "author": {
     "name": "agent.cloud"
