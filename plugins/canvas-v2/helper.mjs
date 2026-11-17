@@ -5,10 +5,14 @@
 //   node canvas-helper.mjs up <canvas origin> <key>             LOCAL-13: the door and every app's card, in one quiet process
 //                                                               of its own that keeps going; says "canvas up" and returns
 //   node canvas-helper.mjs up                                   LOCAL-14: the same, for the canvas and key it remembers
+//   node canvas-helper.mjs show <canvas origin> <app address> [name] [agent]   SAME-1: this folder's app on the canvas, from
+//                                                               the chat that installed the plugin; prints the canvas's address
+//   node canvas-helper.mjs connect <canvas origin> <Connect link> [agent]      SAME-2: opens Connect in this browser, as the
+//                                                               same person, so the agent's next chats find the same canvas
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
-import { execSync, spawn } from 'node:child_process';
+import { execSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -356,6 +360,53 @@ else if (mode === 'up' || mode === 'daemon') {
     };
     look(); setInterval(look, Number(process.env.CANVAS_LOOK_MS) || 3000);
   }
+} else if (mode === 'show' || mode === 'connect') {
+  // SAME-1, SAME-2 (docs/same-chat.md): this computer's own key, the one the plugin's key script keeps (Claude sends it
+  // with every call), made here the first time. The agent's next chats are the same person, so they find the same canvas.
+  const C = new URL(canvas), lib = C.protocol === 'https:' ? https : http;
+  const keyFile = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'usecanvas', canvas.replace(/^[a-z]*:\/\//, '').replace(/[^A-Za-z0-9.-]/g, '_') + '.key');
+  const agent = String(process.argv[mode === 'show' ? 6 : 5] || 'Your agent').slice(0, 80);
+  const call = (method, p, body, key) => new Promise((done) => {
+    const data = JSON.stringify(body || {});
+    const r = lib.request(canvas + p, { method, headers: Object.assign({ 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) }, key ? { authorization: 'Bearer ' + key } : {}) }, (res) => {
+      let b = ''; res.setEncoding('utf8'); res.on('data', (d) => { b += d; });
+      res.on('end', () => { let j = null; try { j = JSON.parse(b); } catch (e) {} done({ status: res.statusCode, json: j }); });
+    });
+    r.on('error', () => done({ status: 0, json: null })); r.setTimeout(30000, () => r.destroy()); r.end(data);
+  });
+  const said = (r, fallback) => (r.json && r.json.error && r.json.error.message) || fallback;
+  const deviceKey = async () => {
+    try { const k = fs.readFileSync(keyFile, 'utf8').trim(); if (k) return k; } catch (e) {}
+    const r = await call('POST', '/api/device', { client: agent });
+    if (!r.json || !r.json.key) { console.error('canvas: ' + said(r, 'the canvas could not be reached. Try again in a moment.')); process.exit(1); }
+    fs.mkdirSync(path.dirname(keyFile), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(keyFile + '.' + process.pid, r.json.key, { mode: 0o600 }); fs.renameSync(keyFile + '.' + process.pid, keyFile);
+    return r.json.key;
+  };
+  (async () => {
+    const key = await deviceKey();
+    if (mode === 'show') {
+      // The project's fingerprint and name, as show_local takes them (LOCAL-15, LOCAL-23): the canvas never learns the path.
+      let d; try { d = path.resolve(execSync('git rev-parse --path-format=absolute --git-common-dir', { stdio: 'pipe' }).toString().trim(), '..'); } catch (e) { d = process.cwd(); }
+      const name = path.basename(d).slice(0, 80);
+      const r = await call('POST', '/api/local/show', { url: String(process.argv[4] || ''), name: String(process.argv[5] || name).slice(0, 120), project: createHash('sha256').update(d).digest('base64url').slice(0, 22), project_name: name }, key);
+      if (r.status !== 200 || !r.json || !r.json.link) { console.error('canvas: ' + said(r, 'the app could not be put on the canvas.')); process.exit(1); }
+      // LOCAL-13: the helper keeps going by itself, as show_local's first step starts it.
+      const up = spawnSync(process.execPath, [process.argv[1], 'up', canvas, r.json.watch], { encoding: 'utf8' });
+      if (up.status !== 0) { console.error('canvas: the helper did not start. ' + String(up.stderr || '').trim()); process.exit(1); }
+      console.log('on the canvas: ' + r.json.link);
+      console.log('open beside the chat: ' + r.json.door);
+      return;
+    }
+    // connect: only the Connect link of this canvas, as the agent's login printed it.
+    let u = null; try { u = new URL(String(process.argv[4] || '')); } catch (e) {}
+    if (!u || u.origin !== C.origin || u.pathname !== '/oauth/authorize') { console.error('canvas: give the Connect link the login printed, on ' + canvas); process.exit(2); }
+    const r = await call('POST', '/api/device/link', {}, key);
+    const to = r.json && r.json.code ? canvas + '/device/link?code=' + encodeURIComponent(r.json.code) + '&next=' + encodeURIComponent(u.pathname + u.search) : u.href;
+    const [cmd, args] = process.platform === 'darwin' ? ['open', [to]] : process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', to]] : ['xdg-open', [to]];
+    const o = spawn(cmd, args, { detached: true, stdio: 'ignore' }); o.on('error', () => console.log('open this link to connect: ' + to)); o.unref();
+    console.log('Connect is open in the browser');
+  })();
 } else if (mode !== 'watch') { // the watcher, above, is a mode of its own
   const target = Number(mode);
   if (!Number.isInteger(target) || target < 1 || target > 65535) usage();
