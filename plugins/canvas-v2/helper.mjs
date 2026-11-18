@@ -285,14 +285,43 @@ function startDoor(soft) {
   };
   listen(server, DOOR, soft);
 }
+// LOCAL-25: what a card shows in place of a sign-in page that won't be framed. Sign in opens it in a window of its own;
+// back from it, that window goes to /__canvas/promote, which hands the frame the app's cookies and closes it.
+const SIGNIN = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Sign in</title>'
+  + '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font:15px/1.5 system-ui,-apple-system,sans-serif;color:#111;background:#fff}'
+  + 'main{max-width:340px;padding:24px;text-align:center}h1{font-size:18px;margin:0}p{color:#555;margin:8px 0 18px}'
+  + 'button{font:inherit;font-weight:600;padding:10px 18px;border:0;border-radius:8px;background:#111;color:#fff;cursor:pointer}button:focus-visible{outline:2px solid #3B82F6;outline-offset:2px}</style>'
+  + '<main><h1>Sign in to see this app</h1><p id="say" role="status">Sign-in opens in a window of its own.</p><button id="go" type="button">Sign in</button></main>'
+  + '<script>(function () {'
+  + 'var to = __TO__, back = __BACK__, w = null, step = 0, go = document.getElementById("go"), say = document.getElementById("say");'
+  + 'function promote() { if (w && !w.closed) w.location.href = location.origin + "/__canvas/promote"; else w = window.open("/__canvas/promote", "canvas-signin", "popup,width=480,height=360"); }'
+  + 'go.onclick = function () {'
+  + '  if (step) return promote();'
+  + '  w = window.open(to, "canvas-signin", "popup,width=480,height=720");'
+  + '  if (!w) { say.textContent = "Your browser blocked the window. Allow pop-ups here, then try again."; return; }'
+  + '  step = 1; go.textContent = "I’ve signed in"; say.textContent = "Finish signing in in the new window, then come back here.";'
+  + '};'
+  + 'addEventListener("message", function (e) { if (e.origin === location.origin && e.data && e.data.canvasSignedIn) location.replace(back); });'
+  + '})();</script></html>';
 function startApp(target, own, soft) {
 
   let me = 'http://localhost:' + own;
   const frameFree = (csp) => csp.split(';').map((d) => d.trim()).filter((d) => d && !/^frame-ancestors\b/i.test(d)).join('; ');
   const cookie = (c) => c.replace(/;\s*samesite=(lax|strict|none)/gi, '').replace(/;\s*secure\b/gi, '') + '; SameSite=None; Secure';
+  const own$ = 'frame-ancestors ' + canvas + ' ' + door;
   const server = http.createServer((req, res) => {
     if (!fromAny(req, [canvas, door], true)) { res.writeHead(403, { 'content-type': 'text/plain' }); res.end('Only the canvas can open this.'); return; }
     if (req.url === '/__canvas/point.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' }); res.end(POINT); return; }
+    // LOCAL-25: back from signing in, in the sign-in window (a page of its own, so its Lax cookies come with it): the
+    // app's cookies again, now SameSite=None, so the card's frame gets them too; then the card reloads.
+    if (req.url === '/__canvas/promote' && req.method === 'GET') {
+      const jar = String(req.headers.cookie || '').split(';').map((c) => c.trim()).filter((c) => /^[^=\s;]+=/.test(c));
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': own$,
+        'set-cookie': jar.map((c) => c + '; Path=/; Max-Age=86400; SameSite=None; Secure') });
+      res.end('<!doctype html><meta charset="utf-8"><title>Signed in</title><p style="font:15px system-ui,sans-serif;text-align:center;margin-top:40vh">Signed in. You can close this window.</p>'
+        + '<script>try { opener && opener.postMessage({ canvasSignedIn: 1 }, location.origin); } catch (e) {} setTimeout(function () { window.close(); }, 300);</script>');
+      return;
+    }
     const headers = { ...req.headers, host: 'localhost:' + target };
     delete headers.origin; delete headers.referer; delete headers['accept-encoding']; // plain pages, so the pointer can go in
     const up = http.request({ host: 'localhost', port: target, method: req.method, path: req.url, headers }, (r) => {
@@ -302,6 +331,19 @@ function startApp(target, own, soft) {
       h['content-security-policy'] = (h['content-security-policy'] ? h['content-security-policy'] + '; ' : '') + 'frame-ancestors ' + canvas + ' ' + door; // only the canvas frames it
       if (h['set-cookie']) h['set-cookie'] = [].concat(h['set-cookie']).map(cookie);
       if (h.location) h.location = String(h.location).replace(/^https?:\/\/(localhost|127\.0\.0\.1):\d+/i, me);
+      // LOCAL-25: sign-in sends the frame off this machine (agent.cloud, Google), and those pages refuse to show in a
+      // frame. The card says so instead and opens it in a window of its own; its cookies (the sign-in's state) still go.
+      const st = r.statusCode || 0, to = String(h.location || '');
+      if (st >= 300 && st < 400 && req.headers['sec-fetch-dest'] === 'iframe' && /^https?:\/\//i.test(to) && !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(to)) {
+        r.resume();
+        let back = '/'; try { const u = new URL(String(req.headers.referer || '')); if (u.port === String(own) && u.pathname !== req.url.split('?')[0]) back = u.pathname + u.search; } catch (e) {}
+        const js = (v) => JSON.stringify(v).replace(/</g, '\\u003c');
+        const out = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': own$ };
+        if (h['set-cookie']) out['set-cookie'] = h['set-cookie'];
+        res.writeHead(200, out);
+        res.end(SIGNIN.replace('__TO__', () => js(to)).replace('__BACK__', () => js(back)));
+        return;
+      }
       if (!/text\/html/i.test(String(h['content-type'] || ''))) { res.writeHead(r.statusCode || 502, h); r.pipe(res); return; }
       // ASK-4: a page gets the pointer, first thing in its head.
       delete h['content-length']; delete h['etag']; delete h['last-modified'];
