@@ -72,8 +72,44 @@ function point() {
     e.preventDefault(); e.stopPropagation();
     var el = e.target, r = el.getBoundingClientRect();
     stop();
-    post({ type: 'picked', selector: selOf(el), label: labelOf(el), path: location.pathname + location.hash, rect: { x: r.left, y: r.top, w: r.width, h: r.height } });
+    var shot = 'p' + Date.now().toString(36);
+    post({ type: 'picked', selector: selOf(el), label: labelOf(el), path: location.pathname + location.hash, rect: { x: r.left, y: r.top, w: r.width, h: r.height }, shot: shot });
+    capture(r).then(function (url) { post({ type: 'shot', id: shot, url: url }); }, function () { post({ type: 'shot', id: shot, url: null }); });
   }, true);
+  // ASK-18: a screenshot of what the person sees, what they pointed at outlined, for the ask. Drawn from the page itself
+  // (html-to-image, loaded only now); a page that won't let it load or draw gets an ask with no picture.
+  var lib = null;
+  function htmlLib() {
+    if (window.htmlToImage) return Promise.resolve(window.htmlToImage);
+    if (!lib) lib = new Promise(function (ok, no) {
+      var urls = ['https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js', 'https://unpkg.com/html-to-image@1.11.11/dist/html-to-image.js'];
+      (function next(i) {
+        if (i >= urls.length) { lib = null; no(new Error('no screenshot library')); return; }
+        var sc = document.createElement('script'); sc.src = urls[i]; sc.setAttribute('data-canvas-ui', '');
+        sc.onload = function () { if (window.htmlToImage) ok(window.htmlToImage); else next(i + 1); };
+        sc.onerror = function () { next(i + 1); };
+        document.head.appendChild(sc);
+      })(0);
+    });
+    return lib;
+  }
+  function capture(r) {
+    var W = innerWidth, H = innerHeight, sx = scrollX, sy = scrollY, de = document.documentElement;
+    var bg = getComputedStyle(document.body).backgroundColor;
+    if (!bg || bg === 'rgba(0, 0, 0, 0)') bg = getComputedStyle(de).backgroundColor;
+    if (!bg || bg === 'rgba(0, 0, 0, 0)') bg = '#ffffff';
+    return htmlLib().then(function (h) {
+      return h.toCanvas(de, { pixelRatio: 1, backgroundColor: bg, width: Math.max(de.scrollWidth, W), height: Math.min(Math.max(de.scrollHeight, H), 16000),
+        filter: function (n) { return !(n.nodeType === 1 && n.hasAttribute && n.hasAttribute('data-canvas-ui')); } });
+    }).then(function (full) {
+      var k = Math.min(1, 1400 / Math.max(W, H)), o = document.createElement('canvas'), g;
+      o.width = Math.round(W * k); o.height = Math.round(H * k); g = o.getContext('2d');
+      g.fillStyle = bg; g.fillRect(0, 0, o.width, o.height);
+      g.drawImage(full, sx, sy, W, H, 0, 0, o.width, o.height);
+      g.strokeStyle = '#3B82F6'; g.lineWidth = 3; g.strokeRect((r.left - 2) * k, (r.top - 2) * k, (r.width + 4) * k, (r.height + 4) * k);
+      return o.toDataURL('image/jpeg', 0.82);
+    });
+  }
   addEventListener('keydown', function (e) { if (picking && e.key === 'Escape') { stop(); post({ type: 'pick-cancel' }); } }, true);
   function drawPins() {
     pinEls.forEach(function (d) { d.remove(); }); pinEls = [];
@@ -200,6 +236,48 @@ function point() {
     for (var id in others) if (!seen[id]) { others[id].remove(); delete others[id]; }
   }
   addEventListener('message', function (e) { if (e.source === parent && e.data && e.data.canvas === 1 && e.data.type === 'cursors') cursors(e.data.list); });
+  // LOCAL-28 (docs/local.md): a change the agent makes shows on the card, small or open full size, with nobody reloading,
+  // in an app that has no live reload of its own (a plain page, a server that serves its files as they are). While the
+  // page is open it reads its own page, scripts and styles every 1.5 s, and loads again once one changes. An app that
+  // reloads itself (Vite, Next, webpack, livereload) is left to it; a file that differs on every read (a page with the
+  // time in it) is left out. Only on the helper's pages: a live copy (live.ts) has the canvas reload it.
+  var helped = document.currentScript && /\/__canvas\/point\.js(\?|$)/.test(document.currentScript.src || '');
+  function reloads() {
+    return [].some.call(document.querySelectorAll('script[src]'), function (s) { return /\/@vite\/client|\/_next\/|webpack|hot-update|livereload|browser-sync|\/@react-refresh/i.test(s.getAttribute('src') || ''); })
+      || !!(window.__vite_plugin_react_preamble_installed__ || window.__NEXT_DATA__ || window.webpackHotUpdate || window.LiveReload);
+  }
+  function sig(t) { var h = 0; for (var i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return t.length + ':' + h; }
+  var seen = {}, dropped = {}, looking = false;
+  function watched() {
+    var urls = [location.href.split('#')[0]];
+    [].forEach.call(document.querySelectorAll('script[src], link[rel~="stylesheet"][href]'), function (el) {
+      var u = same(el.getAttribute('src') || el.getAttribute('href')); if (u && !/\/__canvas\//.test(u) && urls.indexOf(u) < 0) urls.push(u);
+    });
+    return urls.slice(0, 24).filter(function (u) { return !dropped[u]; });
+  }
+  function look() {
+    if (looking || document.hidden) return;
+    looking = true;
+    var urls = watched();
+    Promise.all(urls.map(function (u) {
+      return fetch(u, { cache: 'no-store', credentials: 'same-origin' }).then(function (r) { return r.ok ? r.text() : null; }).catch(function () { return null; });
+    })).then(function (texts) {
+      looking = false;
+      var changed = false;
+      urls.forEach(function (u, i) {
+        if (texts[i] === null) return; // not answering (the app restarting): judged on the next read
+        var s = sig(texts[i]), was = seen[u];
+        if (!was) { seen[u] = { s: s, sure: false, moved: false }; return; }
+        if (was.s === s) { if (was.moved) changed = true; was.sure = true; was.moved = false; return; }
+        if (was.sure) { changed = true; return; }
+        // Not yet read the same twice: a change if the next read agrees, and a file that changes by itself if not.
+        if (was.moved) { dropped[u] = 1; return; }
+        was.s = s; was.moved = true;
+      });
+      if (changed) location.reload();
+    });
+  }
+  if (helped) addEventListener('load', function () { if (!reloads()) setInterval(look, 1500); });
   post({ type: 'ready', path: location.pathname });
 }
 
