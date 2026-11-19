@@ -12,7 +12,7 @@ description: >-
   canvas, ask to build their canvas or its cards, or ask to make their canvas pick real.
 ---
 
-**Their own app (/canvas, "show this on canvas", "canvas it").** Run /canvas's steps: find this project's running app (the listening port whose process works in this folder, preferring a web page and the most recent) or start its dev command, call show_local, start the helper (and door) as its answer says, and open the canvas beside the chat. Ask only if there's no app to find or start.
+**Their own app (/canvas, "show this on canvas", "canvas it").** Run /canvas's steps: find this project's running app (the listening port whose process works in this folder and answers the app's own page: what its dev script serves, never Storybook, docs, a test runner or a database studio) or start its dev command, call show_local, start the helper (and door) as its answer says, and open the canvas beside the chat. Ask only if there's no app to find or start.
 
 The canvas (its tools are waiting_cards, next_card, write_files, finish and picked_card) shows a few takes on one idea; the person picks one and makes it real. The cards are built by you, on the person's own plan; the canvas never calls a model for them.
 
