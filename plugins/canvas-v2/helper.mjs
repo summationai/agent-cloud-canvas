@@ -321,6 +321,23 @@ function startDoor(soft) {
     if (req.url === '/__canvas/up') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('canvas-helper ' + VERSION + ' ' + canvas); return; }
     // Only an "up" holding the same key may stop it, to start a newer one.
     if (keyOf() && req.url === '/__canvas/quit?k=' + encodeURIComponent(keyOf())) { res.writeHead(200); res.end('bye'); setTimeout(() => process.exit(0), 50); return; }
+    // HANDOFF-7: the sign-in page beside the chat opens its /auth/go/<code> link in the person's usual browser, so they
+    // never copy it. Only the door's own page may ask, and only for that one kind of link.
+    if (req.method === 'POST' && req.url === '/__canvas/open') {
+      if (!fromAny(req, [door])) { res.writeHead(403); res.end(); return; }
+      let b = ''; req.setEncoding('utf8'); req.on('data', (d) => { if (b.length < 2000) b += d; });
+      req.on('end', () => {
+        let to = ''; try { to = String(JSON.parse(b).url || ''); } catch (e) {}
+        if (!/^https:\/\/[a-z0-9.-]+\/auth\/go\/[A-Z0-9-]{4,12}$/.test(to)) { res.writeHead(400); res.end(); return; }
+        const [cmd, args] = process.platform === 'darwin' ? ['open', [to]] : process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', to]] : ['xdg-open', [to]];
+        let sent = false; const done = (ok) => { if (sent) return; sent = true; res.writeHead(ok ? 200 : 502, { 'content-type': 'application/json' }); res.end(JSON.stringify({ opened: ok })); };
+        const o = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+        const t = setTimeout(() => { o.unref(); done(true); }, 3000);
+        o.on('error', () => { clearTimeout(t); done(false); });
+        o.on('exit', (code) => { clearTimeout(t); done(code === 0); });
+      });
+      return;
+    }
     door$(req, res);
   });
   const door$ = ((req, res) => {
@@ -521,6 +538,17 @@ else if (mode === 'up' || mode === 'daemon') {
       // The project's fingerprint and name, as show_local takes them (LOCAL-15, LOCAL-23): the canvas never learns the path.
       let d; try { d = path.resolve(execSync('git rev-parse --path-format=absolute --git-common-dir', { stdio: 'pipe' }).toString().trim(), '..'); } catch (e) { d = process.cwd(); }
       const name = path.basename(d).slice(0, 80);
+      // LOCAL-28: a tool beside the app (Storybook, a database studio) is never the project's app.
+      const tool = await new Promise((done) => {
+        let u; try { u = new URL(String(process.argv[4] || '')); } catch (e) { return done(''); }
+        const q = (u.protocol === 'https:' ? https : http).get(u, { timeout: 3000 }, (res) => {
+          let b = ''; res.setEncoding('utf8');
+          res.on('data', (d) => { b += d; if (b.length > 65536) res.destroy(); });
+          res.on('close', () => { const t = (/<title[^>]*>([^<]*)/i.exec(b) || [])[1] || ''; const m = /storybook|prisma studio|drizzle studio|vitest|playwright|mailpit|mailhog/i.exec(t + (/storybook/i.test(b.slice(0, 4096)) ? ' storybook' : '')); done(m ? m[0] : ''); });
+        });
+        q.on('error', () => done('')); q.on('timeout', () => { q.destroy(); done(''); });
+      });
+      if (tool) { console.error('canvas: ' + process.argv[4] + ' is ' + tool.replace(/^./, (c) => c.toUpperCase()) + ', not the project\'s app. Run show again with the address of the app its dev script serves (start it if it isn\'t running).'); process.exit(1); }
       const r = await call('POST', '/api/local/show', { url: String(process.argv[4] || ''), name: String(process.argv[5] || name).slice(0, 120), project: createHash('sha256').update(d).digest('base64url').slice(0, 22), project_name: name }, key);
       if (r.status !== 200 || !r.json || !r.json.link) { console.error('canvas: ' + said(r, 'the app could not be put on the canvas.')); process.exit(1); }
       // LOCAL-13: the helper keeps going by itself, as show_local's first step starts it.
