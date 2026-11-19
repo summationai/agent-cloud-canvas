@@ -4,12 +4,12 @@ description: >-
   Put the person's own app, running on this machine, on their canvas beside the chat
   (/canvas, "show this on canvas", "put my app on canvas", "canvas it"): find this
   project's running app or start it, then show_local, without asking which port. Also
-  build an app with the person on their usecanvas.io (agent.cloud) canvas: start one from their
+  build an app with the person on their usecanvas.io canvas: start one from their
   idea, try versions that differ on purpose, ask them at the forks that matter,
-  and build the cards waiting on it; and make the card they picked a real
-  agent.cloud app. Use when they ask to build an app on agent.cloud, open their
-  agent.cloud canvas, bring an app idea or a change to one, say they'd like to make an app on their canvas, ask to build their canvas or its
-  cards, or ask to make their canvas pick real.
+  and build the cards waiting on it; and make the card they picked a real app.
+  Use when they ask to build an app on usecanvas.io, open their usecanvas.io canvas,
+  bring an app idea or a change to one, say they'd like to make an app on their
+  canvas, ask to build their canvas or its cards, or ask to make their canvas pick real.
 ---
 
 **Their own app (/canvas, "show this on canvas", "canvas it").** Run /canvas's steps: find this project's running app (the listening port whose process works in this folder, preferring a web page and the most recent) or start its dev command, call show_local, start the helper (and door) as its answer says, and open the canvas beside the chat. Ask only if there's no app to find or start.
@@ -22,7 +22,7 @@ The canvas is where you and the person build an app together. They see your card
 
 When they bring an app idea, or a change to one, you drive the canvas: you choose the path, and they decide at the forks that matter.
 
-When they ask to build an app on agent.cloud, or open their canvas, without saying what, your first words are "What do you want to build today?", then three short ideas, one line each, and nothing more. Start a canvas only once they answer.
+When they ask to build an app on usecanvas.io, or open their canvas, without saying what, your first words are "What do you want to build today?", then three short ideas, one line each, and nothing more. Start a canvas only once they answer.
 
 Talk with them about their app, briefly and in plain words. Don't mention this guidance, your tools or their names, the canvas's settings (critical, axis and the like), plugins or sign-ins, unless they ask.
 
@@ -52,7 +52,7 @@ When they have the version they want, they choose Pick this one on it, and you m
 
 1. **Sign in first.** If the canvas's tools aren't loaded, or a call says to sign in, start the canvas server's sign-in (in Claude Code, its authenticate tool), give the person the link, and ask them to press Allow and tell you when it's done. Never start builders before the tools are loaded: they can't do anything without them.
 2. **Count the cards.** Call waiting_cards. It says how many cards are waiting, without taking any.
-3. **One builder per card, all at once.** In Claude Code, start exactly that many `canvas-v2:canvas-builder` subagents in one message, each with the prompt "Build one card from my agent.cloud canvas." They work at low effort, so each card takes about a minute.
+3. **One builder per card, all at once.** In Claude Code, start exactly that many `canvas-v2:canvas-builder` subagents in one message, each with the prompt "Build one card from my canvas." They work at low effort, so each card takes about a minute.
 4. **Check again.** When they've all reported, call waiting_cards again: a change or another canvas may be waiting. Stop when it says nothing is waiting, and tell the person which cards went live and which, if any, still have failing checks.
 
 Where subagents aren't available (Codex), take the cards yourself: next_card, then write_files until every check passes, then finish, and repeat until next_card says nothing is waiting. Keep each card quick: write the files straight away.
