@@ -1,12 +1,12 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "canvas-v2",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Your apps on a canvas beside the chat: /canvas puts the app you are working on there, live from your machine, and your own Claude or Codex builds new versions with you.",
   "author": {
     "name": "agent.cloud"
   },
-  "homepage": "https://agent.cloud",
+  "homepage": "https://usecanvas.io",
   "repository": "https://github.com/summationai/agent-cloud-canvas",
   "keywords": [
     "agent-cloud",
@@ -23,7 +23,7 @@
         "longDescription": "Your apps on a canvas beside the chat: /canvas puts the app you are working on there, live from your machine, and your own Claude or Codex builds new versions with you.",
         "developerName": "agent.cloud",
         "category": "Developer Tools",
-        "websiteURL": "https://agent.cloud",
+        "websiteURL": "https://usecanvas.io",
         "supportURL": "https://agent.cloud/support",
         "privacyPolicyURL": "https://agent.cloud/privacy",
         "termsOfServiceURL": "https://agent.cloud/terms",
