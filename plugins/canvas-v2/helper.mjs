@@ -9,6 +9,8 @@
 //                                                               the chat that installed the plugin; prints the canvas's address
 //   node canvas-helper.mjs connect <canvas origin> <Connect link> [agent]      SAME-2: opens Connect in this browser, as the
 //                                                               same person, so the agent's next chats find the same canvas
+//   node canvas-helper.mjs connect <canvas origin> codex [codex]               SAME-4: the same, starting Codex's sign-in
+//                                                               itself and keeping it waiting for Connect, up to 10 minutes
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -480,12 +482,22 @@ else if (mode === 'up' || mode === 'daemon') {
     };
     look(); setInterval(look, Number(process.env.CANVAS_LOOK_MS) || 3000);
   }
+} else if (mode === 'codex-login') {
+  // SAME-4: Codex's sign-in, kept waiting. "codex mcp login --no-browser" listens for Connect's answer, but also reads a
+  // pasted address and gives up when its input closes, and Codex ends a command's process when its turn ends. So this
+  // process of its own holds its input open, writes what it prints to a file, and stops it after 10 minutes.
+  const log = fs.openSync(process.argv[5], 'a');
+  const c = spawn(process.argv[4], ['mcp', 'login', 'canvas', '--no-browser'], { stdio: ['pipe', log, log] });
+  const stop = setTimeout(() => c.kill(), 600000);
+  c.on('error', (e) => { fs.writeSync(log, 'codex did not start: ' + e.message + '\n'); process.exit(1); });
+  c.on('exit', (code) => { clearTimeout(stop); fs.writeSync(log, '\ncodex login ended: ' + code + '\n'); process.exit(0); });
 } else if (mode === 'show' || mode === 'connect') {
   // SAME-1, SAME-2 (docs/same-chat.md): this computer's own key, the one the plugin's key script keeps (Claude sends it
   // with every call), made here the first time. The agent's next chats are the same person, so they find the same canvas.
   const C = new URL(canvas), lib = C.protocol === 'https:' ? https : http;
   const keyFile = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'usecanvas', canvas.replace(/^[a-z]*:\/\//, '').replace(/[^A-Za-z0-9.-]/g, '_') + '.key');
-  const agent = String(process.argv[mode === 'show' ? 6 : 5] || 'Your agent').slice(0, 80);
+  const viaCodex = mode === 'connect' && process.argv[4] === 'codex';
+  const agent = viaCodex ? 'Codex' : String(process.argv[mode === 'show' ? 6 : 5] || 'Your agent').slice(0, 80);
   const call = (method, p, body, key) => new Promise((done) => {
     const data = JSON.stringify(body || {});
     const r = lib.request(canvas + p, { method, headers: Object.assign({ 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) }, key ? { authorization: 'Bearer ' + key } : {}) }, (res) => {
@@ -518,14 +530,37 @@ else if (mode === 'up' || mode === 'daemon') {
       console.log('open beside the chat: ' + r.json.door);
       return;
     }
-    // connect: only the Connect link of this canvas, as the agent's login printed it.
-    let u = null; try { u = new URL(String(process.argv[4] || '')); } catch (e) {}
+    // connect: only the Connect link of this canvas, as the agent's login printed it, or (SAME-4) as Codex's sign-in,
+    // started here, prints it.
+    let link = String(process.argv[4] || '');
+    if (viaCodex) {
+      const app = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex';
+      const bin = process.argv[5] || (fs.existsSync(app) ? app : 'codex');
+      fs.mkdirSync(HOME, { recursive: true, mode: 0o700 });
+      const logFile = path.join(HOME, 'codex-login.log'); fs.writeFileSync(logFile, '', { mode: 0o600 });
+      spawn(process.execPath, [process.argv[1], 'codex-login', canvas, bin, logFile], { detached: true, stdio: 'ignore' }).unref();
+      link = '';
+      for (let i = 0; i < 80 && !link; i++) {
+        await new Promise((r) => setTimeout(r, 250));
+        const out = fs.readFileSync(logFile, 'utf8');
+        if (/codex (did not start|login ended)/.test(out)) { console.error('canvas: Codex’s sign-in did not start. ' + out.trim().split('\n').pop()); process.exit(1); }
+        link = (out.match(/https?:\/\/\S+\/oauth\/authorize\S*/) || [''])[0];
+      }
+      if (!link) { console.error('canvas: Codex’s sign-in printed no Connect link.'); process.exit(1); }
+    }
+    let u = null; try { u = new URL(link); } catch (e) {}
     if (!u || u.origin !== C.origin || u.pathname !== '/oauth/authorize') { console.error('canvas: give the Connect link the login printed, on ' + canvas); process.exit(2); }
     const r = await call('POST', '/api/device/link', {}, key);
     const to = r.json && r.json.code ? canvas + '/device/link?code=' + encodeURIComponent(r.json.code) + '&next=' + encodeURIComponent(u.pathname + u.search) : u.href;
     const [cmd, args] = process.platform === 'darwin' ? ['open', [to]] : process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', to]] : ['xdg-open', [to]];
-    const o = spawn(cmd, args, { detached: true, stdio: 'ignore' }); o.on('error', () => console.log('open this link to connect: ' + to)); o.unref();
-    console.log('Connect is open in the browser');
+    // Say it's open only once the browser took it; otherwise print the link for the person.
+    const opened = await new Promise((done) => {
+      const o = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+      const t = setTimeout(() => { o.unref(); done(true); }, 5000);
+      o.on('error', () => { clearTimeout(t); done(false); });
+      o.on('exit', (code) => { clearTimeout(t); done(code === 0); });
+    });
+    console.log(opened ? 'Connect is open in the browser' + (viaCodex ? '; Codex waits 10 minutes for it' : '') : 'open this link to connect: ' + to);
   })();
 } else if (mode !== 'watch') { // the watcher, above, is a mode of its own
   const target = Number(mode);
