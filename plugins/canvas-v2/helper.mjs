@@ -486,18 +486,45 @@ function point() {
   function dzTree() {
     dz.els = [];
     // The colours the page already uses, most used first, for the colour picker's swatches.
-    var pal = {};
+    var pal = {}, types = {};
     function col(c) { if (c && c !== 'transparent' && !/^rgba\([^)]*,\s*0\)$/.test(c)) pal[c] = (pal[c] || 0) + 1; }
     function walk(el, depth) {
       if (dz.els.length > 2500) return null;
       var i = dz.els.push(el) - 1, kids = [], k = dzKind(el), cs = getComputedStyle(el);
       col(cs.backgroundColor); if (dzOwnText(el)) col(cs.color); if (num(cs.borderTopWidth) > 0 && cs.borderTopStyle !== 'none') col(cs.borderTopColor);
+      if (dzOwnText(el) && el !== document.body) {
+        var key = dzTypoKey(cs), t = types[key] || (types[key] = { key: key, n: 0, sels: [], tags: {}, family: cs.fontFamily.split(',')[0].replace(/["']/g, '').trim(), size: num(cs.fontSize), weight: cs.fontWeight, lh: cs.lineHeight === 'normal' ? 'Auto' : num(cs.lineHeight), ls: num(cs.letterSpacing) });
+        t.n++; if (t.sels.length < 300) t.sels.push(dzPath(el)); t.tags[el.tagName] = (t.tags[el.tagName] || 0) + 1;
+      }
       if (k !== 'text' && k !== 'vector' && depth < 60) [].forEach.call(el.children, function (c) { if (!dzSkip(c)) { var n = walk(c, depth + 1); if (n) kids.push(n); } });
       var r = el.getBoundingClientRect();
       return { i: i, n: dzName(el), k: k, s: dzPath(el), h: !r.width && !r.height ? 1 : 0, c: kids };
     }
     var tree = walk(document.body, 0);
-    post({ type: 'design-tree', tree: tree, palette: Object.keys(pal).sort(function (x, y) { return pal[y] - pal[x]; }).slice(0, 24) });
+    // DESIGN-13: the text styles the page uses, largest first, named by where they're used (the h1's is Heading 1).
+    var styles = Object.keys(types).map(function (k) { return types[k]; }).sort(function (a, b) { return b.size - a.size || b.n - a.n; }), names = {};
+    styles.forEach(function (t) {
+      var tag = Object.keys(t.tags).sort(function (a, b) { return t.tags[b] - t.tags[a]; })[0] || '';
+      var base = /^H[1-6]$/.test(tag) ? 'Heading ' + tag.charAt(1) : /^(BUTTON|LABEL|INPUT|SELECT|A)$/.test(tag) ? 'Label' : t.size >= 16 ? 'Body' : 'Small', name = base;
+      for (var n = 2; names[name]; n++) name = base + ' ' + n;
+      names[name] = 1; t.name = name; delete t.tags;
+    });
+    post({ type: 'design-tree', tree: tree, palette: Object.keys(pal).sort(function (x, y) { return pal[y] - pal[x]; }).slice(0, 24), styles: styles.slice(0, 40), tokens: dzTokens() });
+  }
+  function dzTypoKey(cs) { return [cs.fontFamily.split(',')[0].replace(/["']/g, '').trim(), num(cs.fontSize), cs.fontWeight, cs.lineHeight === 'normal' ? 'normal' : num(cs.lineHeight), num(cs.letterSpacing)].join('|'); }
+  // DESIGN-13: the design tokens the app defines as CSS variables on :root (Tailwind 4's theme among them), resolved.
+  function dzTokens() {
+    var out = {}, n = 0, root = getComputedStyle(document.documentElement);
+    function rules(list) {
+      [].forEach.call(list || [], function (r) {
+        if (n > 400) return;
+        if (r.cssRules && !r.selectorText) { rules(r.cssRules); return; }
+        if (!r.style || !/(^|[\s,]):root\b|(^|[\s,])html\b/.test(r.selectorText || '')) return;
+        for (var i = 0; i < r.style.length; i++) { var p = r.style[i]; if (p.indexOf('--') === 0 && !(p in out)) { var v = root.getPropertyValue(p).trim(); if (v) { out[p] = v; n++; } } }
+      });
+    }
+    [].forEach.call(document.styleSheets, function (sh) { var list = null; try { list = sh.cssRules; } catch (e) {} rules(list); });
+    return out;
   }
   function dzTreeSoon() { if (dz.on && !dz.treeT) dz.treeT = setTimeout(function () { dz.treeT = null; if (dz.on) dzTree(); }, 400); }
   function num(v) { var n = parseFloat(v); return isFinite(n) ? Math.round(n * 100) / 100 : 0; }
@@ -534,8 +561,8 @@ function point() {
       pad: [num(cs.paddingTop), num(cs.paddingRight), num(cs.paddingBottom), num(cs.paddingLeft)],
       radius: num(cs.borderTopLeftRadius), opacity: num(cs.opacity), bg: cs.backgroundColor, shadow: cs.boxShadow,
       stroke: { w: num(cs.borderTopWidth), c: cs.borderTopColor, s: cs.borderTopStyle },
-      font: text ? { size: num(cs.fontSize), weight: cs.fontWeight, lh: cs.lineHeight === 'normal' ? 'Auto' : num(cs.lineHeight), ls: num(cs.letterSpacing), color: cs.color, align: cs.textAlign, family: (cs.fontFamily || '').split(',')[0].replace(/["']/g, '').trim() } : null,
-      kids: [].filter.call(el.children, function (c) { return !dzSkip(c); }).length, stack: flex ? null : dzStack(el)
+      font: text ? { style: dzTypoKey(cs), size: num(cs.fontSize), weight: cs.fontWeight, lh: cs.lineHeight === 'normal' ? 'Auto' : num(cs.lineHeight), ls: num(cs.letterSpacing), color: cs.color, align: cs.textAlign, family: (cs.fontFamily || '').split(',')[0].replace(/["']/g, '').trim() } : null,
+      kids: [].filter.call(el.children, function (c) { return !dzSkip(c); }).length, stack: flex ? null : dzStack(el), likes: dzLikes(el)
     };
   }
   function dzSend() {
@@ -671,6 +698,15 @@ function point() {
       batch: ks.map(function (c, n) { return { sel: dzPath(c), props: { order: String(n) } }; }) });
   }
   // Shift+A, as in Figma: auto layout on the selection, its direction and gap read from where its children sit now.
+  // DESIGN-12 (Emin, 22 Nov: "if this is red button in design system, if i change it all buttons are change or?"): the
+  // elements that look like this one, the same element with the same classes, which a style change goes to as well.
+  function dzClasses(el) { return (typeof el.className === 'string' ? el.className : '').trim().split(/\s+/).filter(Boolean).sort().join(' '); }
+  function dzLikes(el) {
+    var cls = dzClasses(el), out = [];
+    if (!cls || el === document.body) return out;
+    [].forEach.call(document.getElementsByTagName(el.tagName), function (o) { if (o !== el && out.length < 50 && !ui(o) && dzClasses(o) === cls) out.push(dzPath(o)); });
+    return out;
+  }
   // DESIGN-11 (Emin, 22 Nov: "why don't see spacing between two layer?"): a plain container whose layers sit one under
   // another (or side by side) has a spacing a person sees though it's no auto layout: their own margins. Measured here.
   function dzStack(el) {
