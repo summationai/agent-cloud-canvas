@@ -30,6 +30,19 @@ const VERSION = (() => { try { return createHash('sha256').update(fs.readFileSyn
 const mode = process.argv[2], canvas = String(process.argv[3] || saved.canvas || 'https://canvas-v2.ac0.app');
 // The key: the one remembered for this canvas, read afresh each time (a later "up" leaves a newer one), else the one given.
 const keyOf = () => { const r = remembered(); return String((r.canvas === canvas && r.key) || process.argv[4] || ''); };
+// LOCAL-32: every other process running this helper as a daemon (ps, so not on Windows, where the door's quit is all).
+const stopOthers = () => {
+  if (process.platform === 'win32') return 0;
+  const me = new Set([process.argv[1], path.resolve(process.argv[1])]); try { me.add(fs.realpathSync(process.argv[1])); } catch (e) {}
+  let list = ''; try { list = execSync('ps -eo pid=,args=', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch (e) { return 0; }
+  let n = 0;
+  for (const line of list.split('\n')) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line); if (!m || Number(m[1]) === process.pid) continue;
+    if (![...me].some((f) => m[2].includes(' ' + f + ' daemon '))) continue;
+    try { process.kill(Number(m[1])); n++; } catch (e) {}
+  }
+  return n;
+};
 const usage = () => { console.error('usage: node canvas-helper.mjs up|watch|door|<port of your app> <canvas origin, like https://canvas-v2.ac0.app> [key]'); process.exit(2); };
 if (!/^https:\/\/[a-z0-9.-]+$|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(canvas)) usage();
 // A request this machine's browser makes from one of these pages, or from the page itself, or typed in the address bar;
@@ -68,9 +81,9 @@ function point() {
     box.style.display = 'block'; box.style.left = (r.left - 2) + 'px'; box.style.top = (r.top - 2) + 'px'; box.style.width = (r.width + 4) + 'px'; box.style.height = (r.height + 4) + 'px';
   }
   function stop() { picking = false; if (box) box.style.display = 'none'; document.documentElement.style.cursor = ''; }
-  addEventListener('mousemove', function (e) { if (picking && e.target && e.target !== box) outline(e.target); }, true);
+  addEventListener('mousemove', function (e) { if (picking && e.target && e.target !== box && !ui(e.target)) outline(e.target); }, true);
   addEventListener('click', function (e) {
-    if (!picking) return;
+    if (!picking || ui(e.target)) return;
     e.preventDefault(); e.stopPropagation();
     var el = e.target, r = el.getBoundingClientRect();
     stop();
@@ -113,8 +126,10 @@ function point() {
     });
   }
   addEventListener('keydown', function (e) { if (picking && e.key === 'Escape') { stop(); post({ type: 'pick-cancel' }); } }, true);
+  var pinsSaid = '';
   function drawPins() {
     pinEls.forEach(function (d) { d.remove(); }); pinEls = [];
+    var spots = {};
     pins.forEach(function (p) {
       var el = null; try { el = p.selector ? document.querySelector(p.selector) : null; } catch (x) {}
       if (!el) return;
@@ -123,9 +138,13 @@ function point() {
       d.setAttribute('data-canvas-ui', '');
       d.textContent = p.n; d.title = p.text;
       d.style.cssText = 'position:fixed;z-index:2147483646;left:' + Math.max(2, r.right - 12) + 'px;top:' + Math.max(2, r.top - 12) + 'px;width:22px;height:22px;border-radius:11px 11px 11px 3px;border:2px solid #fff;background:' + (p.done ? '#16A34A' : '#3B82F6') + ';color:#fff;font:600 11px/18px system-ui,sans-serif;padding:0;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.25)';
-      d.onclick = function (e) { e.preventDefault(); e.stopPropagation(); post({ type: 'pin', id: p.id }); };
+      var at = { x: Math.max(2, r.right - 12), y: Math.max(2, r.top - 12) }; // ASK-23: its thread opens beside it
+      spots[p.id] = at;
+      d.onclick = function (e) { e.preventDefault(); e.stopPropagation(); post({ type: 'pin', id: p.id, at: at }); };
       document.documentElement.appendChild(d); pinEls.push(d);
     });
+    // ASK-23: where the pins are, whenever that changes, so a thread opened from the canvas (not its pin) sits beside it.
+    var said = JSON.stringify(spots); if (said !== pinsSaid) { pinsSaid = said; post({ type: 'pinsAt', at: spots }); }
   }
   // LIVE-1 (docs/live.md): while the canvas asks for it, a copy of the page as it looks now, whenever it changes, for
   // the people on the canvas whose machines can't reach this app: its styles, pictures and fonts inside it, no scripts.
@@ -150,7 +169,8 @@ function point() {
     });
   }
   function snapshot() {
-    var budget = { left: 2400000 } /* raw bytes: as base64 they grow by a third, and a copy must stay under 4 MB */, outside = [], sheets = [].slice.call(document.styleSheets).concat([].slice.call(document.adoptedStyleSheets || []));
+    // The canvas's own styles (which version of a part shows, ASK-20) are never part of a copy: its page script draws them.
+    var budget = { left: 2400000 } /* raw bytes: as base64 they grow by a third, and a copy must stay under 4 MB */, outside = [], sheets = [].filter.call(document.styleSheets, function (sh) { var o = sh.ownerNode; return !(o && o.hasAttribute && o.hasAttribute('data-canvas-ui')); }).concat([].slice.call(document.adoptedStyleSheets || []));
     var css = Promise.all(sheets.map(function (sh) {
       try { return cssOf([].map.call(sh.cssRules, function (r) { return r.cssText; }).join('\n'), sh.href || location.href, budget); }
       catch (e) { if (sh.href && !same(sh.href)) outside.push(sh.href); return ''; }
@@ -189,12 +209,122 @@ function point() {
     liveT = null; lastSnap = Date.now();
     snapshot().then(function (html) { if (html !== lastHtml && html.length < 4000000) { lastHtml = html; post({ type: 'snapshot', html: html, path: location.pathname }); } }).catch(function () {});
   }
-  function soon() { if (!live || liveT) return; liveT = setTimeout(snap, Math.max(1200, lastSnap + 4000 - Date.now())); }
+  // DESIGN-2: while Design is on, the page shows this viewer's preview, which is never part of a copy.
+  function soon() { if (!live || liveT || dz.on || dz.n) return; liveT = setTimeout(snap, Math.max(1200, lastSnap + 4000 - Date.now())); }
   // What the canvas draws in the app (cursors, pins, the pointer's outline), anywhere inside it: never a change to copy.
   var ui = function (n) { var e = n && (n.nodeType === 1 ? n : n.parentNode); return !!(e && e.closest && e.closest('[data-canvas-ui]')); };
   new MutationObserver(function (rs) {
-    if (rs.some(function (r) { return !ui(r.target) && !([].every.call(r.addedNodes, ui) && [].every.call(r.removedNodes, ui) && r.type === 'childList'); })) soon();
+    if (rs.some(function (r) { return !ui(r.target) && !([].every.call(r.addedNodes, ui) && [].every.call(r.removedNodes, ui) && r.type === 'childList'); })) { soon(); vsoon(); }
+    if (dz.on && rs.some(function (r) { return r.type !== 'attributes' && !ui(r.target); })) dzTreeSoon();
   }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+  // ASK-20 (docs/asks.md): versions of one part, side by side in the app's own markup: a [data-canvas-part] holding one
+  // [data-canvas-v] per version, every one rendered. One shows at a time, and a switch drawn on the part flips them, for
+  // this viewer only; its Keep asks the app's maker's agent to keep that one (ASK-21). None of it is part of a copy.
+  // Keep is instant here (Emin, 21 Nov: "when say keep as it's don't start streaming and making changes"): the kept
+  // version shows and the switch goes at once, for this tab even across reloads, while the agent tidies the code.
+  var chosen = {}, bars = {}, kept = {}, vst = null, vT = null, PARTNAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/, VNAME = /^[a-z0-9]{1,12}$/;
+  var FONT = 'all:initial;box-sizing:border-box;font:500 12px/16px Inter,system-ui,-apple-system,sans-serif;letter-spacing:-.01em;';
+  try { kept = JSON.parse(sessionStorage.getItem('canvas-kept') || '{}') || {}; } catch (e) {}
+  function sig(p) { return p.name + '|' + p.vs.map(function (c) { return vname(c) + ':' + (c.getAttribute('data-canvas-title') || ''); }).join(','); }
+  function vsoon() { if (!vT) vT = setTimeout(function () { vT = null; drawVersions(); }, 120); }
+  function vname(c) { return c.getAttribute('data-canvas-v') || ''; }
+  function vparts() {
+    var out = [];
+    [].forEach.call(document.querySelectorAll('[data-canvas-part]'), function (el) {
+      var name = el.getAttribute('data-canvas-part') || '';
+      if (!PARTNAME.test(name) || ui(el)) return;
+      var vs = [].filter.call(el.children, function (c) { return VNAME.test(vname(c)); });
+      if (vs.length > 1) out.push({ name: name, el: el, vs: vs });
+    });
+    return out;
+  }
+  // A version is a wrapper with display: contents, so it has no box of its own: what it holds has.
+  function rectOf(el) {
+    var r = el.getBoundingClientRect();
+    if (r.width || r.height) return r;
+    var l = Infinity, t = Infinity, rt = -Infinity, b = -Infinity;
+    [].forEach.call(el.children, function (c) { var x = rectOf(c); if (!x.width && !x.height) return; l = Math.min(l, x.left); t = Math.min(t, x.top); rt = Math.max(rt, x.right); b = Math.max(b, x.bottom); });
+    return l === Infinity ? r : { left: l, top: t, right: rt, bottom: b, width: rt - l, height: b - t };
+  }
+  function shownOf(p) {
+    var v = kept[sig(p)] || chosen[p.name];
+    if (v && p.vs.some(function (c) { return vname(c) === v; })) return v;
+    return vname(p.vs.filter(function (c) { return !c.hasAttribute('hidden'); })[0] || p.vs[0]);
+  }
+  function short(v) { return v === 'now' ? 'Now' : v.toUpperCase(); }
+  function keepIt(p, v) {
+    var cur = p.vs.filter(function (c) { return vname(c) === v; })[0];
+    kept[sig(p)] = v; chosen[p.name] = v; if (armed === p.name) armed = null;
+    try { sessionStorage.setItem('canvas-kept', JSON.stringify(kept)); } catch (err) {}
+    post({ type: 'keep', part: p.name, v: v, title: (cur && cur.getAttribute('data-canvas-title')) || '', selector: '[data-canvas-part="' + p.name + '"] > [data-canvas-v="' + v + '"]', path: location.pathname + location.hash });
+    drawVersions();
+  }
+  // Esc right after flipping a part's switch discards its takes: the part stays as it was, as Keep as is does (Emin,
+  // 21 Nov: "when click esc..just discard it"). Only then, so the app's own Esc (a dialog, a menu) never throws them away.
+  var armed = null;
+  addEventListener('pointerdown', function (e) { if (armed && !(bars[armed] && bars[armed].contains(e.target))) armed = null; }, true);
+  addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape' || !armed) return;
+    var p = vparts().filter(function (x) { return x.name === armed; })[0];
+    if (!p || !p.vs.some(function (c) { return vname(c) === 'now'; })) { armed = null; return; }
+    e.preventDefault(); e.stopPropagation(); keepIt(p, 'now');
+  }, true);
+  function drawVersions() {
+    var css = '', here = {}, placed = [];
+    vparts().forEach(function (p) {
+      var v = shownOf(p), sel = '[data-canvas-part="' + p.name + '"] > [data-canvas-v';
+      css += sel + ']{display:none!important}' + sel + '="' + v + '"]{display:contents!important}\n';
+      if (kept[sig(p)] === v) return;
+      here[p.name] = 1;
+      versionBar(p, v, placed);
+    });
+    for (var n in bars) if (!here[n]) { bars[n].remove(); delete bars[n]; }
+    if (!vst && css) { vst = document.createElement('style'); vst.setAttribute('data-canvas-ui', ''); document.documentElement.appendChild(vst); }
+    if (vst && vst.textContent !== css) vst.textContent = css;
+  }
+  function versionBar(p, v, placed) {
+    var el = bars[p.name];
+    var key = sig(p) + '#' + v;
+    if (!el || el.__key !== key) {
+      if (!el) { el = document.createElement('div'); el.setAttribute('data-canvas-ui', ''); el.setAttribute('role', 'toolbar'); document.documentElement.appendChild(el); bars[p.name] = el; }
+      el.__key = key; el.innerHTML = '';
+      el.setAttribute('aria-label', 'Versions of ' + p.name);
+      el.style.cssText = FONT + 'position:fixed;z-index:2147483646;display:flex;align-items:center;gap:6px;padding:4px;border-radius:12px;background:#fff;color:#111;box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 6px 18px rgba(0,0,0,.12);max-width:calc(100vw - 8px)';
+      var track = document.createElement('div');
+      track.style.cssText = FONT + 'display:flex;flex:none;padding:2px;border-radius:8px;background:rgba(0,0,0,.06)';
+      p.vs.forEach(function (c) {
+        var id = vname(c), on = id === v, b = document.createElement('button');
+        b.type = 'button'; b.textContent = short(id); b.setAttribute('aria-pressed', on ? 'true' : 'false');
+        b.title = (c.getAttribute('data-canvas-title') || short(id)) + (c.getAttribute('data-canvas-why') ? ' · ' + c.getAttribute('data-canvas-why') : '');
+        b.style.cssText = FONT + 'min-width:30px;height:24px;padding:0 8px;border-radius:6px;text-align:center;cursor:pointer;color:' + (on ? '#111' : '#6D6D6D') + ';background:' + (on ? '#fff' : 'transparent') + ';box-shadow:' + (on ? '0 1px 2px rgba(0,0,0,.1),0 0 0 .5px rgba(0,0,0,.06)' : 'none');
+        b.onclick = function (e) { e.preventDefault(); e.stopPropagation(); armed = p.name; chosen[p.name] = id; drawVersions(); post({ type: 'version', part: p.name, v: id }); };
+        track.appendChild(b);
+      });
+      el.appendChild(track);
+      // Only the letters: a version's name is its button's tooltip, never words on the switch.
+      var k = document.createElement('button');
+      k.type = 'button';
+      k.textContent = v === 'now' ? 'Keep as is' : 'Keep ' + short(v);
+      k.style.cssText = FONT + 'flex:none;height:28px;padding:0 12px;border-radius:8px;white-space:nowrap;color:#fff;cursor:pointer;background:#111';
+      k.onclick = function (e) { e.preventDefault(); e.stopPropagation(); keepIt(p, v); };
+      el.appendChild(k);
+    }
+    // Above the part's left end, else under it: the versions differ in width, so a switch hung off the right end jumped
+    // with every flip (Emin, 21 Nov: "panel position weirdly change"); the left end stays put. Never on top of another
+    // part's switch: then the other side of the part, else to the right of the one in the way.
+    var r = rectOf(p.el), h = el.offsetHeight || 36, w = el.offsetWidth || 220;
+    var above = r.top - h - 8, below = r.bottom + 8, x = Math.max(4, Math.min(innerWidth - w - 4, r.left));
+    var y = Math.max(4, above >= 4 ? above : below);
+    var hits = function (x, y) { for (var i = 0; i < placed.length; i++) { var o = placed[i]; if (x < o.x + o.w + 6 && x + w + 6 > o.x && y < o.y + o.h + 6 && y + h + 6 > o.y) return o; } return null; };
+    var hit = hits(x, y);
+    if (hit) { var y2 = y === below ? Math.max(4, above) : below; if (!hits(x, y2)) y = y2; else x = Math.max(4, Math.min(innerWidth - w - 4, hit.x + hit.w + 8)); }
+    el.style.display = r.bottom < 0 || r.top > innerHeight ? 'none' : 'flex';
+    el.style.left = x + 'px'; el.style.top = y + 'px';
+    placed.push({ x: x, y: y, w: w, h: h });
+  }
+  addEventListener('load', drawVersions);
+  addEventListener('scroll', function () { for (var n in bars) { drawVersions(); return; } }, true);
+  addEventListener('resize', drawVersions);
   addEventListener('load', soon); addEventListener('input', soon, true); addEventListener('scroll', function () {}, true);
   addEventListener('message', function (e) {
     if (e.source !== parent) return;
@@ -205,7 +335,7 @@ function point() {
   });
   addEventListener('scroll', function () { if (pins.length) drawPins(); }, true);
   addEventListener('resize', function () { if (pins.length) drawPins(); });
-  setInterval(function () { if (pins.length) drawPins(); }, 1500);
+  setInterval(function () { if (pins.length) drawPins(); drawVersions(); }, 1500);
   // CURSOR-1 (docs/cursors.md): where this person's pointer is in the app, for the others' cursors; and theirs, drawn
   // where they point, gliding between the canvas's polls. Neither is ever part of a copy (data-canvas-ui).
   var pt = 0, others = {};
@@ -238,6 +368,30 @@ function point() {
     for (var id in others) if (!seen[id]) { others[id].remove(); delete others[id]; }
   }
   addEventListener('message', function (e) { if (e.source === parent && e.data && e.data.canvas === 1 && e.data.type === 'cursors') cursors(e.data.list); });
+  // FRAME-15 (Emin, 21 Nov): the page this frame is on, its title and its links, for the canvas's page switcher and for the
+  // frame to open where it was left; and going to a page the canvas names (a path on this app, never another site).
+  var lastPage = '';
+  function pageInfo() {
+    var seen = {}, links = [];
+    [].forEach.call(document.querySelectorAll('a[href]'), function (a) {
+      var u; try { u = new URL(a.getAttribute('href'), location.href); } catch (err) { return; }
+      var path = u.pathname + u.search, words = (a.getAttribute('aria-label') || a.getAttribute('title') || (a.textContent || '').trim().split('\n')[0] || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+      if (u.origin !== location.origin) return;
+      if (seen[path]) { if (words && (!seen[path].title || words.length < seen[path].title.length)) seen[path].title = words; return; } // its shortest words
+      if (links.length >= 200) return;
+      seen[path] = { path: path, title: words };
+      links.push(seen[path]);
+    });
+    lastPage = location.pathname + location.search + location.hash;
+    post({ type: 'page', path: lastPage, title: (document.title || '').slice(0, 120), links: links });
+  }
+  if (document.readyState === 'loading') addEventListener('DOMContentLoaded', pageInfo); else pageInfo();
+  addEventListener('load', pageInfo);
+  setInterval(function () { if (location.pathname + location.search + location.hash !== lastPage) pageInfo(); }, 800); // client-side routes
+  addEventListener('message', function (e) {
+    var d = e.data;
+    if (e.source === parent && d && d.canvas === 1 && d.type === 'go' && typeof d.path === 'string' && d.path.charAt(0) === '/' && d.path.charAt(1) !== '/') location.assign(d.path);
+  });
   // LOCAL-28 (docs/local.md): a change the agent makes shows on the card, small or open full size, with nobody reloading,
   // in an app that has no live reload of its own (a plain page, a server that serves its files as they are). While the
   // page is open it reads its own page, scripts and styles every 1.5 s, and loads again once one changes. An app that
@@ -248,7 +402,7 @@ function point() {
     return [].some.call(document.querySelectorAll('script[src]'), function (s) { return /\/@vite\/client|\/_next\/|webpack|hot-update|livereload|browser-sync|\/@react-refresh/i.test(s.getAttribute('src') || ''); })
       || !!(window.__vite_plugin_react_preamble_installed__ || window.__NEXT_DATA__ || window.webpackHotUpdate || window.LiveReload);
   }
-  function sig(t) { var h = 0; for (var i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return t.length + ':' + h; }
+  function hsig(t) { var h = 0; for (var i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return t.length + ':' + h; }
   var seen = {}, dropped = {}, looking = false;
   function watched() {
     var urls = [location.href.split('#')[0]];
@@ -258,7 +412,9 @@ function point() {
     return urls.slice(0, 24).filter(function (u) { return !dropped[u]; });
   }
   function look() {
-    if (looking || document.hidden) return;
+    // DESIGN-2: a change the agent makes shows at once, unsaved Design changes or not (the canvas sends the preview back
+    // when the page is ready again); it waits only while words are being typed or a handle is being dragged.
+    if (looking || document.hidden || dz.editing || dz.rs) return;
     looking = true;
     var urls = watched();
     Promise.all(urls.map(function (u) {
@@ -268,7 +424,7 @@ function point() {
       var changed = false;
       urls.forEach(function (u, i) {
         if (texts[i] === null) return; // not answering (the app restarting): judged on the next read
-        var s = sig(texts[i]), was = seen[u];
+        var s = hsig(texts[i]), was = seen[u];
         if (!was) { seen[u] = { s: s, sure: false, moved: false }; return; }
         if (was.s === s) { if (was.moved) changed = true; was.sure = true; was.moved = false; return; }
         if (was.sure) { changed = true; return; }
@@ -280,12 +436,364 @@ function point() {
     });
   }
   if (helped) addEventListener('load', function () { if (!reloads()) setInterval(look, 1500); });
-  post({ type: 'ready', path: location.pathname });
+  // DESIGN-1 to DESIGN-6 (docs/design.md): Design, in a local card's full view. The app holds still: a click selects
+  // instead of using it, and every change is a preview on this page only (inline styles and text), drawn from the list
+  // the canvas keeps and sends whole (design-apply). Nothing reaches the app's code until the person presses Save there.
+  var dz = { on: false, sel: null, selPath: '', multi: [], rs: null, resized: 0, hov: null, els: [], orig: [], texts: new Map(), n: 0, editing: null, show: null, root: null, treeT: null, tick: null };
+  var BLUE = '#0D99FF';
+  function dzPath(el) {
+    var parts = [];
+    for (var e = el; e && e.nodeType === 1 && e !== document.body && e !== document.documentElement; e = e.parentElement) {
+      if (e.id && /^[A-Za-z][\w-]*$/.test(e.id) && document.querySelectorAll('#' + e.id).length === 1) { parts.unshift('#' + e.id); return parts.join(' > '); }
+      var p = e.parentElement, tag = e.tagName.toLowerCase();
+      if (p) tag += ':nth-child(' + ([].indexOf.call(p.children, e) + 1) + ')';
+      parts.unshift(tag);
+    }
+    return parts.length ? 'body > ' + parts.join(' > ') : 'body';
+  }
+  function dzSkip(el) { return ui(el) || /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|LINK|META|HEAD|TITLE|BR)$/.test(el.tagName); }
+  function dzPlain(el) { if (!el.childNodes.length) return false; for (var i = 0; i < el.childNodes.length; i++) if (el.childNodes[i].nodeType !== 3) return false; return /\S/.test(el.textContent || ''); }
+  function dzOwnText(el) { for (var i = 0; i < el.childNodes.length; i++) { var n = el.childNodes[i]; if (n.nodeType === 3 && /\S/.test(n.data)) return true; } return false; }
+  function dzKind(el) {
+    var tag = el.tagName.toLowerCase(), cs = getComputedStyle(el);
+    if (/^(img|picture|video|canvas|iframe)$/.test(tag)) return 'image';
+    if (tag === 'svg') return 'vector';
+    if (/flex/.test(cs.display)) return /column/.test(cs.flexDirection) ? 'col' : 'row';
+    if (/grid/.test(cs.display)) return 'grid';
+    if (dzPlain(el)) return 'text';
+    return 'frame';
+  }
+  var NICE = { main: 'Main', header: 'Header', nav: 'Nav', footer: 'Footer', section: 'Section', aside: 'Aside', form: 'Form', ul: 'List', ol: 'List', li: 'Item', img: 'Image', svg: 'Icon', table: 'Table', textarea: 'Text area', select: 'Select', input: 'Input', article: 'Article', button: 'Button', a: 'Link', label: 'Label', body: 'Page' };
+  function dzName(el) {
+    var tag = el.tagName.toLowerCase(), k = dzKind(el);
+    if (k === 'text') return (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    var a = el.getAttribute('aria-label') || el.getAttribute('alt') || el.getAttribute('placeholder') || el.getAttribute('title');
+    if (a) return a.replace(/\s+/g, ' ').trim().slice(0, 40);
+    if (NICE[tag]) return NICE[tag];
+    var cls = (typeof el.className === 'string' ? el.className : '').trim().split(/\s+/)[0] || '';
+    if (cls && cls.length > 2 && !/[:\[\]\/]|^-?(p|m|px|py|pt|pb|pl|pr|mx|my|mt|mb|flex|grid|gap|w|h|min|max|text|bg|border|rounded|items|justify|space|font|leading|tracking|shadow|relative|absolute|block|inline|hidden|overflow|col|row)(-|$)/.test(cls)) return cls.slice(0, 40);
+    return k === 'grid' ? 'Grid' : /^h[1-6]$/.test(tag) ? 'Heading' : k === 'row' || k === 'col' || tag === 'div' ? 'Frame' : tag;
+  }
+  // What a change says it's about, for the agent and the list: a generic name gets the words inside it.
+  function dzDesc(el) {
+    var n = dzName(el);
+    if (dzKind(el) === 'text' || !/^(Frame|Article|Section|Item|Button|Link|Label|List|Grid|Heading|Main|Header|Footer|Nav|Aside|Form|Page|div|span)$/.test(n)) return n;
+    var t = (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    return t ? n + ': ' + t : n;
+  }
+  function dzTree() {
+    dz.els = [];
+    // The colours the page already uses, most used first, for the colour picker's swatches.
+    var pal = {};
+    function col(c) { if (c && c !== 'transparent' && !/^rgba\([^)]*,\s*0\)$/.test(c)) pal[c] = (pal[c] || 0) + 1; }
+    function walk(el, depth) {
+      if (dz.els.length > 2500) return null;
+      var i = dz.els.push(el) - 1, kids = [], k = dzKind(el), cs = getComputedStyle(el);
+      col(cs.backgroundColor); if (dzOwnText(el)) col(cs.color); if (num(cs.borderTopWidth) > 0 && cs.borderTopStyle !== 'none') col(cs.borderTopColor);
+      if (k !== 'text' && k !== 'vector' && depth < 60) [].forEach.call(el.children, function (c) { if (!dzSkip(c)) { var n = walk(c, depth + 1); if (n) kids.push(n); } });
+      var r = el.getBoundingClientRect();
+      return { i: i, n: dzName(el), k: k, s: dzPath(el), h: !r.width && !r.height ? 1 : 0, c: kids };
+    }
+    var tree = walk(document.body, 0);
+    post({ type: 'design-tree', tree: tree, palette: Object.keys(pal).sort(function (x, y) { return pal[y] - pal[x]; }).slice(0, 24) });
+  }
+  function dzTreeSoon() { if (dz.on && !dz.treeT) dz.treeT = setTimeout(function () { dz.treeT = null; if (dz.on) dzTree(); }, 400); }
+  function num(v) { var n = parseFloat(v); return isFinite(n) ? Math.round(n * 100) / 100 : 0; }
+  function dzProbe(el, prop, val) { var was = el.getAttribute('style'); el.style.setProperty(prop, val, 'important'); var r = el.getBoundingClientRect(); if (was === null) el.removeAttribute('style'); else el.setAttribute('style', was); return r; }
+  function dzInfo(el) {
+    var cs = getComputedStyle(el), r = el.getBoundingClientRect(), p = el.parentElement, pcs = p && p !== document.documentElement ? getComputedStyle(p) : null;
+    var pflex = !!(pcs && /flex/.test(pcs.display)), prow = pflex && !/column/.test(pcs.flexDirection);
+    var abs = cs.position === 'absolute' || cs.position === 'fixed';
+    function mode(horiz) {
+      if (el === document.body || el.style.getPropertyValue(horiz ? 'width' : 'height') === '100%') return 'fill';
+      var inl = el.style.getPropertyValue(horiz ? 'width' : 'height'), auto = inl === '' || inl === 'auto';
+      var size = horiz ? r.width : r.height, main = pflex && horiz === prow;
+      if (!abs && main && num(cs.flexGrow) > 0) return 'fill';
+      if (!abs && pflex && !main && (cs.alignSelf === 'stretch' || (cs.alignSelf === 'auto' || cs.alignSelf === 'normal') && /stretch|normal/.test(pcs.alignItems)) && auto) {
+        var fit = dzProbe(el, horiz ? 'width' : 'height', 'fit-content'); if (Math.abs((horiz ? fit.width : fit.height) - size) > 0.5) return 'fill';
+      }
+      if (!abs && !pflex && horiz && /^(block|flex|grid|table|list-item)$/.test(cs.display) && pcs && !/grid/.test(pcs.display)) {
+        var pr = p.getBoundingClientRect(), inner = pr.width - num(pcs.paddingLeft) - num(pcs.paddingRight) - num(pcs.borderLeftWidth) - num(pcs.borderRightWidth);
+        if (Math.abs(size + num(cs.marginLeft) + num(cs.marginRight) - inner) < 1 && auto) { var f2 = dzProbe(el, 'width', 'fit-content'); if (Math.abs(f2.width - size) > 0.5) return 'fill'; }
+      }
+      var hug = dzProbe(el, horiz ? 'width' : 'height', 'fit-content');
+      return Math.abs((horiz ? hug.width : hug.height) - size) <= 0.5 ? 'hug' : 'fixed';
+    }
+    var flex = /flex/.test(cs.display), row = flex && !/column/.test(cs.flexDirection);
+    var gap = flex ? num(row ? cs.columnGap : cs.rowGap) : 0;
+    var text = dzOwnText(el) || dzKind(el) === 'text';
+    var cls = (typeof el.className === 'string' ? el.className : (el.className && el.className.baseVal) || '').trim().split(/\s+/).filter(Boolean).slice(0, 6).join('.');
+    return {
+      sel: dzPath(el), name: dzName(el), desc: dzDesc(el), kind: dzKind(el), tag: el.tagName.toLowerCase(), cls: cls, body: el === document.body,
+      text: dzPlain(el) ? (el.textContent || '').slice(0, 300) : null,
+      w: Math.round(r.width * 10) / 10, h: Math.round(r.height * 10) / 10, wMode: mode(true), hMode: mode(false),
+      parent: pflex ? (prow ? 'row' : 'col') : pcs && /grid/.test(pcs.display) ? 'grid' : 'block', abs: abs,
+      display: cs.display, flex: flex ? { dir: row ? 'row' : 'col', wrap: cs.flexWrap === 'wrap', gap: gap, jc: cs.justifyContent, ai: cs.alignItems } : null,
+      pad: [num(cs.paddingTop), num(cs.paddingRight), num(cs.paddingBottom), num(cs.paddingLeft)],
+      radius: num(cs.borderTopLeftRadius), opacity: num(cs.opacity), bg: cs.backgroundColor, shadow: cs.boxShadow,
+      stroke: { w: num(cs.borderTopWidth), c: cs.borderTopColor, s: cs.borderTopStyle },
+      font: text ? { size: num(cs.fontSize), weight: cs.fontWeight, lh: cs.lineHeight === 'normal' ? 'Auto' : num(cs.lineHeight), ls: num(cs.letterSpacing), color: cs.color, align: cs.textAlign, family: (cs.fontFamily || '').split(',')[0].replace(/["']/g, '').trim() } : null,
+      kids: [].filter.call(el.children, function (c) { return !dzSkip(c); }).length
+    };
+  }
+  function dzSend() {
+    if (!dz.on) return;
+    dz.multi = dz.multi.filter(function (m) { return m && m.isConnected; });
+    if (dz.sel && dz.multi.indexOf(dz.sel) < 0) dz.multi = [dz.sel];
+    dz.lastInfo = dz.sel && dz.sel.isConnected ? dzInfo(dz.sel) : null;
+    post({ type: 'design-sel', info: dz.lastInfo, infos: dz.multi.length > 1 ? dz.multi.map(dzInfo) : null });
+    dzDraw();
+  }
+  // DESIGN-7: Shift+click adds to the selection or takes away from it; a plain click selects one thing.
+  function dzSelect(el, scroll, add) {
+    if (dz.editing) dzEndEdit(false);
+    if (add && el) {
+      if (!dz.multi.length && dz.sel) dz.multi = [dz.sel];
+      var at = dz.multi.indexOf(el);
+      if (at >= 0) { dz.multi.splice(at, 1); el = dz.multi[dz.multi.length - 1] || null; } else dz.multi.push(el);
+    } else dz.multi = el ? [el] : [];
+    dz.sel = el; dz.selPath = el ? dzPath(el) : '';
+    if (el && scroll) { var r = el.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) el.scrollIntoView({ block: 'center' }); }
+    dzDraw(); dzSend();
+  }
+  function dzTarget(t) {
+    if (!t || t.nodeType !== 1) t = t && t.parentElement;
+    var s = t && t.closest && t.closest('svg'); while (s && s.parentElement && s.parentElement.closest('svg')) s = s.parentElement.closest('svg');
+    if (s) t = s;
+    if (t === document.documentElement) t = document.body;
+    return t;
+  }
+  function dzRect(r, css) { return '<div style="position:fixed;box-sizing:border-box;left:' + r.left + 'px;top:' + r.top + 'px;width:' + Math.max(0, r.width) + 'px;height:' + Math.max(0, r.height) + 'px;' + css + '"></div>'; }
+  var HATCH = 'background:repeating-linear-gradient(-45deg,rgba(242,78,154,.38) 0 1px,rgba(242,78,154,.12) 1px 5px)';
+  function dzDraw() {
+    if (!dz.root) { dz.root = document.createElement('div'); dz.root.setAttribute('data-canvas-ui', ''); dz.root.style.cssText = 'position:fixed;inset:0;z-index:2147483640;pointer-events:none'; document.documentElement.appendChild(dz.root); }
+    if (!dz.on) { dz.root.innerHTML = ''; return; }
+    if (dz.sel && !dz.sel.isConnected) { var again = null; try { again = dz.selPath ? document.querySelector(dz.selPath) : null; } catch (e) {} dz.sel = again; }
+    var html = '';
+    if (dz.hov && dz.hov !== dz.sel && dz.hov.isConnected && !dz.editing) html += dzRect(dz.hov.getBoundingClientRect(), 'outline:1px solid ' + BLUE);
+    var el = dz.sel;
+    if (el) {
+      var r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+      var bt = num(cs.borderTopWidth), br = num(cs.borderRightWidth), bb = num(cs.borderBottomWidth), bl = num(cs.borderLeftWidth);
+      var pt = num(cs.paddingTop), pr = num(cs.paddingRight), pb = num(cs.paddingBottom), pl = num(cs.paddingLeft);
+      if (dz.show === 'pad') {
+        html += dzRect({ left: r.left + bl, top: r.top + bt, width: r.width - bl - br, height: pt }, HATCH) + dzRect({ left: r.left + bl, top: r.bottom - bb - pb, width: r.width - bl - br, height: pb }, HATCH)
+          + dzRect({ left: r.left + bl, top: r.top + bt + pt, width: pl, height: r.height - bt - bb - pt - pb }, HATCH) + dzRect({ left: r.right - br - pr, top: r.top + bt + pt, width: pr, height: r.height - bt - bb - pt - pb }, HATCH);
+      }
+      if (dz.show === 'gap' && /flex/.test(cs.display)) {
+        var row = !/column/.test(cs.flexDirection), top = r.top + bt + pt, left = r.left + bl + pl, bottom = r.bottom - bb - pb, right = r.right - br - pr;
+        var ks = [].filter.call(el.children, function (c) { var s = getComputedStyle(c); return !dzSkip(c) && s.position !== 'absolute' && s.position !== 'fixed' && s.display !== 'none'; })
+          .map(function (c) { return c.getBoundingClientRect(); }).sort(function (a, b) { return row ? a.left - b.left : a.top - b.top; });
+        for (var i = 1; i < ks.length; i++) {
+          var a = ks[i - 1], b = ks[i];
+          if (row && b.left > a.right && Math.abs(b.top - a.top) < a.height) html += dzRect({ left: a.right, top: top, width: b.left - a.right, height: bottom - top }, HATCH);
+          if (!row && b.top > a.bottom && Math.abs(b.left - a.left) < a.width) html += dzRect({ left: left, top: a.bottom, width: right - left, height: b.top - a.bottom }, HATCH);
+        }
+      }
+      var many = dz.multi.length > 1, u = r;
+      if (many) {
+        var ul = Infinity, ut = Infinity, ur = -Infinity, ub = -Infinity;
+        dz.multi.forEach(function (m) { if (!m.isConnected) return; var q = m.getBoundingClientRect(); html += dzRect(q, 'outline:1px solid ' + BLUE); ul = Math.min(ul, q.left); ut = Math.min(ut, q.top); ur = Math.max(ur, q.right); ub = Math.max(ub, q.bottom); });
+        if (ul !== Infinity) u = { left: ul, top: ut, right: ur, bottom: ub, width: ur - ul, height: ub - ut };
+      }
+      html += dzRect(u, 'outline:' + (many ? '1px' : '1.5px') + ' solid ' + BLUE);
+      // DESIGN-8: one thing selected, its edges and corners resize it, as in Figma.
+      if (!dz.editing && !many) [['n', r.left + 6, r.top - 4, r.width - 12, 8, 'ns'], ['s', r.left + 6, r.bottom - 4, r.width - 12, 8, 'ns'], ['w', r.left - 4, r.top + 6, 8, r.height - 12, 'ew'], ['e', r.right - 4, r.top + 6, 8, r.height - 12, 'ew']].forEach(function (h) {
+        html += '<div data-dz-h="' + h[0] + '" style="position:fixed;left:' + h[1] + 'px;top:' + h[2] + 'px;width:' + Math.max(0, h[3]) + 'px;height:' + Math.max(0, h[4]) + 'px;pointer-events:auto;cursor:' + h[5] + '-resize"></div>';
+      });
+      if (!dz.editing) [['nw', u.left, u.top], ['ne', u.right, u.top], ['sw', u.left, u.bottom], ['se', u.right, u.bottom]].forEach(function (c) {
+        html += '<div ' + (many ? '' : 'data-dz-h="' + c[0] + '" ') + 'style="position:fixed;left:' + (c[1] - 7) + 'px;top:' + (c[2] - 7) + 'px;width:14px;height:14px;' + (many ? '' : 'pointer-events:auto;cursor:' + (c[0] === 'nw' || c[0] === 'se' ? 'nwse' : 'nesw') + '-resize') + '"><i style="position:absolute;left:3px;top:3px;width:8px;height:8px;box-sizing:border-box;background:#fff;border:1px solid ' + BLUE + '"></i></div>';
+      });
+      var info = !dz.rs && !many && dz.lastInfo && dz.lastInfo.sel === dz.selPath ? dz.lastInfo : null;
+      var W = info && info.wMode !== 'fixed' ? info.wMode.charAt(0).toUpperCase() + info.wMode.slice(1) : String(Math.round(u.width * 10) / 10);
+      var H = info && info.hMode !== 'fixed' ? info.hMode.charAt(0).toUpperCase() + info.hMode.slice(1) : String(Math.round(u.height * 10) / 10);
+      var ly = u.bottom + 6 > innerHeight - 20 ? Math.max(2, u.top - 22) : u.bottom + 8;
+      html += '<div style="position:fixed;left:' + (u.left + u.width / 2) + 'px;top:' + ly + 'px;transform:translateX(-50%);padding:0 5px;border-radius:3px;background:' + BLUE + ';color:#fff;font:500 11px/16px Inter,system-ui,sans-serif;white-space:nowrap">' + W + ' × ' + H + '</div>';
+    }
+    dz.root.innerHTML = html;
+  }
+  function dzSetText(el, t) {
+    var ns = [].filter.call(el.childNodes, function (n) { return n.nodeType === 3; });
+    if (!ns.length) { el.appendChild(document.createTextNode(t)); return; }
+    ns.forEach(function (n, i) { n.data = i === 0 ? t : ''; });
+  }
+  function dzApply(list) {
+    dz.orig.forEach(function (o) { if (o.style === null) o.el.removeAttribute('style'); else o.el.setAttribute('style', o.style); });
+    dz.orig = [];
+    dz.texts.forEach(function (t, el) { dzSetText(el, t); });
+    dz.texts = new Map();
+    (list || []).forEach(function (c) {
+      var el = null; try { el = document.querySelector(c.sel); } catch (e) {}
+      if (!el || ui(el)) return;
+      if (!dz.orig.some(function (o) { return o.el === el; })) dz.orig.push({ el: el, style: el.getAttribute('style') });
+      for (var p in c.props || {}) if (typeof c.props[p] === 'string') el.style.setProperty(p, c.props[p], 'important');
+      if (typeof c.text === 'string' && dzPlain(el)) { if (!dz.texts.has(el)) dz.texts.set(el, el.textContent); dzSetText(el, c.text); }
+    });
+    dz.n = (list || []).length;
+    dzSend(); dzTreeSoon();
+  }
+  function dzEdit(el) {
+    if (!el || !dzPlain(el)) return;
+    if (!dz.texts.has(el)) dz.texts.set(el, el.textContent);
+    dz.editing = el; dz.editFrom = el.textContent; dz.editNodes = [].slice.call(el.childNodes);
+    el.setAttribute('contenteditable', 'plaintext-only'); if (el.contentEditable !== 'plaintext-only') el.setAttribute('contenteditable', 'true');
+    el.focus();
+    try { var rg = document.createRange(); rg.selectNodeContents(el); var s = getSelection(); s.removeAllRanges(); s.addRange(rg); } catch (e) {}
+    dzDraw();
+  }
+  function dzEndEdit(cancel) {
+    var el = dz.editing; if (!el) return;
+    dz.editing = null;
+    var to = el.textContent;
+    el.removeAttribute('contenteditable');
+    // The app's own text nodes go back in place (a framework keeps them), holding the new words.
+    while (el.firstChild) el.removeChild(el.firstChild);
+    dz.editNodes.forEach(function (n) { el.appendChild(n); });
+    dzSetText(el, cancel ? dz.editFrom : to);
+    try { getSelection().removeAllRanges(); } catch (e) {}
+    if (!cancel && to !== dz.editFrom) post({ type: 'design-change', sel: dzPath(el), label: dzDesc(el), field: 'text', from: dz.editFrom, to: to, text: to });
+    dzDraw();
+  }
+  function dzKids(p) {
+    return [].filter.call(p.children, function (c) { var s = getComputedStyle(c); return !dzSkip(c) && s.position !== 'absolute' && s.position !== 'fixed'; })
+      .map(function (c, i) { return { c: c, o: num(getComputedStyle(c).order), i: i }; }).sort(function (a, b) { return a.o - b.o || a.i - b.i; }).map(function (x) { return x.c; });
+  }
+  function dzMove(dir) {
+    var el = dz.sel, p = el && el.parentElement; if (!p || el === document.body) return;
+    if (!/flex|grid/.test(getComputedStyle(p).display)) return;
+    var ks = dzKids(p), i = ks.indexOf(el), j = i + dir;
+    if (i < 0 || j < 0 || j >= ks.length) return;
+    ks[i] = ks[j]; ks[j] = el;
+    post({ type: 'design-change', sel: dzPath(p), label: dzDesc(p), field: 'order', from: '', to: ks.map(function (c) { return '"' + dzDesc(c) + '"'; }).join(', '),
+      batch: ks.map(function (c, n) { return { sel: dzPath(c), props: { order: String(n) } }; }) });
+  }
+  // Shift+A, as in Figma: auto layout on the selection, its direction and gap read from where its children sit now.
+  function dzAuto(el) {
+    if (!el) return;
+    var ks = dzKids(el).map(function (c) { return c.getBoundingClientRect(); }).filter(function (r) { return r.width || r.height; });
+    var row = ks.length > 1 && ks[1].left >= ks[0].right - 1 && Math.abs(ks[1].top - ks[0].top) < ks[0].height, gap = 0;
+    for (var i = 1; i < ks.length; i++) { var g = row ? ks[i].left - ks[i - 1].right : ks[i].top - ks[i - 1].bottom; if (g > 0) gap = gap ? Math.min(gap, g) : g; }
+    post({ type: 'design-change', sel: dzPath(el), label: dzDesc(el), field: 'auto layout', from: 'none', to: (row ? 'horizontal' : 'vertical') + ', gap ' + Math.round(gap) + 'px',
+      set: { display: 'flex', 'flex-direction': row ? 'row' : 'column', gap: Math.round(gap) + 'px' } });
+  }
+  function dzOn(on) {
+    if (on === dz.on) return;
+    dz.on = on;
+    if (!on) { if (dz.editing) dzEndEdit(true); dzApply([]); dz.sel = dz.hov = null; dz.show = null; clearInterval(dz.tick); dz.tick = null; dzDraw(); return; }
+    dz.tick = setInterval(function () { if (dz.on) dzDraw(); }, 400);
+    dzTree(); dzDraw();
+  }
+  // DESIGN-8: dragging a handle sets the size it's dragged to (Fixed, as Figma does), previewed as it moves.
+  function dzSizeWord(i, W) { var m = i ? i[W ? 'wMode' : 'hMode'] : 'fixed'; return m === 'fixed' ? Math.round(i ? i[W ? 'w' : 'h'] : 0) + 'px' : m === 'hug' ? 'hug contents (fit-content)' : 'fill the container'; }
+  function dzResized(s) {
+    var both = s.set.width && s.set.height;
+    post({ type: 'design-change', sel: dzPath(s.el), label: dzDesc(s.el), field: both ? 'size' : s.set.width ? 'width' : 'height',
+      from: both ? s.fw + ' × ' + s.fh : s.set.width ? s.fw : s.fh, to: both ? s.set.width + ' × ' + s.set.height : s.set.width || s.set.height, set: s.set });
+  }
+  addEventListener('pointerdown', function (e) {
+    var h = dz.on && e.target && e.target.closest ? e.target.closest('[data-dz-h]') : null;
+    if (!h || !dz.sel) return;
+    e.preventDefault(); e.stopPropagation();
+    var el = dz.sel, r = el.getBoundingClientRect(), cs = getComputedStyle(el), p = el.parentElement, pcs = p && p !== document.documentElement ? getComputedStyle(p) : null;
+    var pflex = !!(pcs && /flex/.test(pcs.display)), cb = cs.boxSizing !== 'border-box';
+    dz.rs = { el: el, dir: h.getAttribute('data-dz-h'), x0: e.clientX, y0: e.clientY, w0: r.width, h0: r.height, set: null, t: 0,
+      dw: cb ? num(cs.paddingLeft) + num(cs.paddingRight) + num(cs.borderLeftWidth) + num(cs.borderRightWidth) : 0,
+      dh: cb ? num(cs.paddingTop) + num(cs.paddingBottom) + num(cs.borderTopWidth) + num(cs.borderBottomWidth) : 0,
+      row: pflex && !/column/.test(pcs.flexDirection), col: pflex && /column/.test(pcs.flexDirection), fw: dzSizeWord(dz.lastInfo, true), fh: dzSizeWord(dz.lastInfo, false) };
+    try { document.documentElement.setPointerCapture(e.pointerId); } catch (x) {}
+  }, true);
+  addEventListener('pointermove', function (e) {
+    var s = dz.rs; if (!s) return;
+    e.preventDefault(); e.stopPropagation();
+    var dx = e.clientX - s.x0, dy = e.clientY - s.y0, set = {}, W = null, H = null;
+    if (/e/.test(s.dir)) W = s.w0 + dx; else if (/w/.test(s.dir)) W = s.w0 - dx;
+    if (/s/.test(s.dir)) H = s.h0 + dy; else if (/n/.test(s.dir)) H = s.h0 - dy;
+    if (e.shiftKey && W !== null && H !== null && s.h0) { var k = Math.max(W / s.w0, H / s.h0); W = s.w0 * k; H = s.h0 * k; }
+    if (W !== null) { set.width = Math.max(0, Math.round(W) - s.dw) + 'px'; if (s.row) { set['flex-grow'] = '0'; set['flex-basis'] = 'auto'; } if (s.col) set['align-self'] = 'auto'; }
+    if (H !== null) { set.height = Math.max(0, Math.round(H) - s.dh) + 'px'; if (s.col) { set['flex-grow'] = '0'; set['flex-basis'] = 'auto'; } if (s.row) set['align-self'] = 'auto'; }
+    for (var p in set) s.el.style.setProperty(p, set[p], 'important');
+    s.set = set; dzDraw();
+    if (!s.t) s.t = requestAnimationFrame(function () { s.t = 0; if (dz.rs === s && s.set) dzResized(s); });
+  }, true);
+  function dzResizeEnd(e) {
+    var s = dz.rs; if (!s) return;
+    dz.rs = null; dz.resized = Date.now();
+    if (s.t) cancelAnimationFrame(s.t);
+    if (s.set) dzResized(s);
+    try { document.documentElement.releasePointerCapture(e.pointerId); } catch (x) {}
+    dzDraw();
+  }
+  addEventListener('pointerup', dzResizeEnd, true); addEventListener('pointercancel', dzResizeEnd, true);
+  function dzMine(e) { return !dz.on || picking || ui(e.target) || (dz.editing && dz.editing.contains(e.target)); }
+  ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'auxclick', 'contextmenu', 'submit', 'touchstart', 'touchend', 'mouseover', 'mouseout', 'dragstart'].forEach(function (t) {
+    addEventListener(t, function (e) {
+      if (dzMine(e)) return;
+      e.preventDefault(); e.stopPropagation();
+      // Held back, the press would leave the keyboard on the canvas: the app takes it, so Delete, the arrows and Esc reach it.
+      if (t === 'pointerdown') try { window.focus(); } catch (x) {}
+    }, true);
+  });
+  addEventListener('mousemove', function (e) {
+    if (dzMine(e) || dz.editing || dz.rs) return;
+    e.stopPropagation();
+    var t = dzTarget(e.target); if (t !== dz.hov) { dz.hov = t; dzDraw(); post({ type: 'design-hover', sel: t ? dzPath(t) : '' }); }
+  }, true);
+  addEventListener('mouseout', function (e) { if (dz.on && !e.relatedTarget && dz.hov) { dz.hov = null; dzDraw(); } }, true);
+  addEventListener('click', function (e) {
+    if (dzMine(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    if (Date.now() - dz.resized < 400) return; // the click that ends a resize selects nothing
+    if (dz.editing) dzEndEdit(false);
+    dzSelect(dzTarget(e.target), false, e.shiftKey);
+  }, true);
+  addEventListener('dblclick', function (e) {
+    if (dzMine(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    var t = dzTarget(e.target); if (t && dzPlain(t)) { dzSelect(t); dzEdit(t); }
+  }, true);
+  addEventListener('keydown', dzKeys, true);
+  function dzKeys(e) {
+    if (!dz.on || picking) return;
+    if (dz.editing) { if (e.key === 'Escape' || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); e.stopPropagation(); dzEndEdit(e.key === 'Escape'); } return; }
+    var k = e.key, mod = e.metaKey || e.ctrlKey, el = dz.sel;
+    e.stopPropagation();
+    if (mod && (k === 'z' || k === 'Z')) { e.preventDefault(); post({ type: 'design-key', key: e.shiftKey ? 'redo' : 'undo' }); return; }
+    if (mod && (k === 's' || k === 'S')) { e.preventDefault(); post({ type: 'design-key', key: 'save' }); return; }
+    if (mod) return;
+    if (k === 'Escape') { e.preventDefault(); if (el && el !== document.body && el.parentElement) dzSelect(el.parentElement, true); else dzSelect(null); return; }
+    if (!el) return;
+    if (k === 'Enter') { e.preventDefault(); if (dzPlain(el)) dzEdit(el); else { var first = dzKids(el)[0]; if (first) dzSelect(first, true); } return; }
+    if (k === 'Tab') { e.preventDefault(); var p = el.parentElement; if (!p) return; var ks = dzKids(p), i = ks.indexOf(el), nx = ks[(i + (e.shiftKey ? -1 : 1) + ks.length) % ks.length]; if (nx) dzSelect(nx, true); return; }
+    if (k === 'Backspace' || k === 'Delete') { e.preventDefault(); (dz.multi.length > 1 ? dz.multi : [el]).forEach(function (m) { if (m !== document.body) post({ type: 'design-change', sel: dzPath(m), label: dzDesc(m), field: 'remove', from: 'shown', to: 'removed', set: { display: 'none' } }); }); return; }
+    if (/^Arrow(Up|Left)$/.test(k)) { e.preventDefault(); if (dz.multi.length < 2) dzMove(-1); return; }
+    if (/^Arrow(Down|Right)$/.test(k)) { e.preventDefault(); if (dz.multi.length < 2) dzMove(1); return; }
+    if ((k === 'A' || k === 'a') && e.shiftKey) { e.preventDefault(); dzAuto(el); return; }
+  }
+  addEventListener('scroll', function () { if (dz.on) dzDraw(); }, true);
+  addEventListener('resize', function () { if (dz.on) dzDraw(); });
+  addEventListener('message', function (e) {
+    if (e.source !== parent) return;
+    var d = e.data || {}; if (d.canvas !== 1) return;
+    // DESIGN-10: the card on the canvas shows its maker's unsaved changes too, without Design (nothing is selected or held).
+    if (d.type === 'design-preview' && !dz.on) dzApply(d.changes || []);
+    if (d.type === 'design') { dzOn(!!d.on); if (d.on) { dzApply(d.changes || []); if (d.sel && !dz.sel) { var s = null; try { s = document.querySelector(d.sel); } catch (x) {} if (s) dzSelect(s); } } }
+    if (!dz.on) return;
+    if (d.type === 'design-apply') dzApply(d.changes || []);
+    function bySel(s) { try { return typeof s === 'string' && s ? document.querySelector(s) : null; } catch (x) { return null; } }
+    if (d.type === 'design-pick') { var el = typeof d.sel === 'string' ? bySel(d.sel) : dz.els[d.i]; if (el && el.isConnected) dzSelect(el, true, !!d.add); else if (d.i === null) dzSelect(null); }
+    if (d.type === 'design-hover') { var h = typeof d.sel === 'string' ? bySel(d.sel) : typeof d.i === 'number' ? dz.els[d.i] : null; dz.hov = h && h.isConnected ? h : null; if (dz.hov && typeof d.sel === 'string') { var hr = dz.hov.getBoundingClientRect(); if (hr.bottom < 0 || hr.top > innerHeight) dz.hov.scrollIntoView({ block: 'center' }); } dzDraw(); }
+    if (d.type === 'design-show') { dz.show = d.what === 'pad' || d.what === 'gap' ? d.what : null; dzDraw(); }
+    if (d.type === 'design-auto') dzAuto(dz.sel);
+    // A key pressed while the keyboard is on the canvas, passed on (Delete, the arrows, Enter, Tab, Esc, Shift+A).
+    if (d.type === 'design-keydown' && typeof d.key === 'string') dzKeys({ key: d.key, shiftKey: !!d.shift, metaKey: false, ctrlKey: false, preventDefault: function () {}, stopPropagation: function () {} });
+    if (d.type === 'design-parent' && dz.sel && dz.sel !== document.body && dz.sel.parentElement) dzSelect(dz.sel.parentElement, true);
+  });
+  post({ type: 'ready', path: location.pathname, design: 1 }); // DESIGN-6: this page can do Design
 }
 
 const POINT = '(' + point.toString() + ')();';
 const listen = (server, port, soft) => {
-  server.on('error', (e) => { if (soft) return; console.error(e.code === 'EADDRINUSE' ? 'canvas-helper: port ' + port + ' is taken (one may already be running: that is fine)' : String(e)); process.exit(1); });
+  server.on('error', (e) => { if (typeof soft === 'function') return soft(e, () => server.listen(port, '127.0.0.1')); if (soft) return; console.error(e.code === 'EADDRINUSE' ? 'canvas-helper: port ' + port + ' is taken (one may already be running: that is fine)' : String(e)); process.exit(1); });
   server.listen(port, '127.0.0.1', () => { if (!soft) console.log('canvas-helper ready http://localhost:' + port + '/'); });
 };
 
@@ -484,11 +992,17 @@ else if (mode === 'up' || mode === 'daemon') {
         for (const k of new Set([key, saved.key].filter(Boolean))) await get(door + '/__canvas/quit?k=' + encodeURIComponent(k));
         for (let i = 0; i < 20 && await get(door + '/__canvas/up'); i++) await new Promise((f) => setTimeout(f, 100));
       }
+      // LOCAL-32: and any other daemon of this helper still running: one that held another key (it wouldn't quit), and
+      // those an older helper left behind, still holding apps' ports with older code. Emin, 21 Nov: 71 of them, since 18 Nov.
+      if (stopOthers()) for (let i = 0; i < 30 && await get(door + '/__canvas/up'); i++) await new Promise((f) => setTimeout(f, 100));
       spawn(process.execPath, [process.argv[1], 'daemon', canvas, key], { detached: true, stdio: 'ignore' }).unref();
       console.log('canvas up');
     })();
   } else {
-    startDoor(true);
+    // LOCAL-32: the door marks the one process. A daemon that can't take it (another holds it, and didn't give way in
+    // 5 s) ends, instead of staying on to grab the apps' ports with what may be older code.
+    let tries = 0;
+    startDoor((e, again) => { if (e.code === 'EADDRINUSE' && ++tries < 25) setTimeout(again, 200); else process.exit(0); });
     // Every app on this person's canvases gets its card's helper, as it appears.
     const C = new URL(canvas), lib = C.protocol === 'https:' ? https : http, started = new Set();
     const look = () => {
