@@ -535,7 +535,7 @@ function point() {
       radius: num(cs.borderTopLeftRadius), opacity: num(cs.opacity), bg: cs.backgroundColor, shadow: cs.boxShadow,
       stroke: { w: num(cs.borderTopWidth), c: cs.borderTopColor, s: cs.borderTopStyle },
       font: text ? { size: num(cs.fontSize), weight: cs.fontWeight, lh: cs.lineHeight === 'normal' ? 'Auto' : num(cs.lineHeight), ls: num(cs.letterSpacing), color: cs.color, align: cs.textAlign, family: (cs.fontFamily || '').split(',')[0].replace(/["']/g, '').trim() } : null,
-      kids: [].filter.call(el.children, function (c) { return !dzSkip(c); }).length
+      kids: [].filter.call(el.children, function (c) { return !dzSkip(c); }).length, stack: flex ? null : dzStack(el)
     };
   }
   function dzSend() {
@@ -582,8 +582,9 @@ function point() {
         html += dzRect({ left: r.left + bl, top: r.top + bt, width: r.width - bl - br, height: pt }, HATCH) + dzRect({ left: r.left + bl, top: r.bottom - bb - pb, width: r.width - bl - br, height: pb }, HATCH)
           + dzRect({ left: r.left + bl, top: r.top + bt + pt, width: pl, height: r.height - bt - bb - pt - pb }, HATCH) + dzRect({ left: r.right - br - pr, top: r.top + bt + pt, width: pr, height: r.height - bt - bb - pt - pb }, HATCH);
       }
-      if (dz.show === 'gap' && /flex/.test(cs.display)) {
-        var row = !/column/.test(cs.flexDirection), top = r.top + bt + pt, left = r.left + bl + pl, bottom = r.bottom - bb - pb, right = r.right - br - pr;
+      var stk = dz.show === 'gap' && !/flex/.test(cs.display) ? dzStack(el) : null;
+      if (dz.show === 'gap' && (/flex/.test(cs.display) || stk)) {
+        var row = stk ? stk.dir === 'row' : !/column/.test(cs.flexDirection), top = r.top + bt + pt, left = r.left + bl + pl, bottom = r.bottom - bb - pb, right = r.right - br - pr;
         var ks = [].filter.call(el.children, function (c) { var s = getComputedStyle(c); return !dzSkip(c) && s.position !== 'absolute' && s.position !== 'fixed' && s.display !== 'none'; })
           .map(function (c) { return c.getBoundingClientRect(); }).sort(function (a, b) { return row ? a.left - b.left : a.top - b.top; });
         for (var i = 1; i < ks.length; i++) {
@@ -670,13 +671,30 @@ function point() {
       batch: ks.map(function (c, n) { return { sel: dzPath(c), props: { order: String(n) } }; }) });
   }
   // Shift+A, as in Figma: auto layout on the selection, its direction and gap read from where its children sit now.
+  // DESIGN-11 (Emin, 22 Nov: "why don't see spacing between two layer?"): a plain container whose layers sit one under
+  // another (or side by side) has a spacing a person sees though it's no auto layout: their own margins. Measured here.
+  function dzStack(el) {
+    var cs = getComputedStyle(el);
+    if (/flex|grid|inline$|contents/.test(cs.display) || el === document.body) return null;
+    var ks = dzKids(el).filter(function (c) { var r = c.getBoundingClientRect(); return getComputedStyle(c).display !== 'none' && (r.width || r.height); });
+    if (ks.length < 2) return null;
+    var rs = ks.map(function (c) { return c.getBoundingClientRect(); }), col = true, row = true, gaps = [];
+    for (var i = 1; i < rs.length; i++) {
+      if (rs[i].top < rs[i - 1].bottom - 1) col = false;
+      if (rs[i].left < rs[i - 1].right - 1 || Math.abs(rs[i].top - rs[i - 1].top) > Math.max(rs[i - 1].height, 1)) row = false;
+    }
+    if (!col && !row) return null;
+    for (var j = 1; j < rs.length; j++) gaps.push(col ? rs[j].top - rs[j - 1].bottom : rs[j].left - rs[j - 1].right);
+    return { dir: col ? 'col' : 'row', gap: Math.max(0, Math.round(Math.min.apply(null, gaps))), kids: ks.map(dzPath) };
+  }
+  // Shift+A, as in Figma: auto layout on the selection, its direction and gap read from where its layers sit now; their
+  // own margins along it go, so the spacing stays what it was instead of the gap adding to it.
   function dzAuto(el) {
     if (!el) return;
-    var ks = dzKids(el).map(function (c) { return c.getBoundingClientRect(); }).filter(function (r) { return r.width || r.height; });
-    var row = ks.length > 1 && ks[1].left >= ks[0].right - 1 && Math.abs(ks[1].top - ks[0].top) < ks[0].height, gap = 0;
-    for (var i = 1; i < ks.length; i++) { var g = row ? ks[i].left - ks[i - 1].right : ks[i].top - ks[i - 1].bottom; if (g > 0) gap = gap ? Math.min(gap, g) : g; }
-    post({ type: 'design-change', sel: dzPath(el), label: dzDesc(el), field: 'auto layout', from: 'none', to: (row ? 'horizontal' : 'vertical') + ', gap ' + Math.round(gap) + 'px',
-      set: { display: 'flex', 'flex-direction': row ? 'row' : 'column', gap: Math.round(gap) + 'px' } });
+    var st = dzStack(el), row = !!(st && st.dir === 'row'), gap = st ? st.gap : 0, m = row ? ['margin-left', 'margin-right'] : ['margin-top', 'margin-bottom'];
+    var set = { display: 'flex', 'flex-direction': row ? 'row' : 'column', gap: gap + 'px' }; if (row) set['align-items'] = 'flex-start';
+    post({ type: 'design-change', sel: dzPath(el), label: dzDesc(el), field: 'auto layout', from: 'none', to: (row ? 'horizontal' : 'vertical') + ', gap ' + gap + 'px' + (st ? ' (display: flex), its layers’ own ' + (row ? 'side' : 'top and bottom') + ' margins removed' : ''),
+      set: set, batch: st ? st.kids.map(function (k) { var p = {}; p[m[0]] = '0px'; p[m[1]] = '0px'; return { sel: k, props: p }; }) : undefined });
   }
   function dzOn(on) {
     if (on === dz.on) return;
