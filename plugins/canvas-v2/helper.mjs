@@ -23,6 +23,8 @@ const DOOR = Number(process.env.CANVAS_DOOR_PORT) || 47777, door = 'http://local
 // LOCAL-14: "up" with a canvas and key remembers them here (only this person can read it), so "up" alone, from
 // Claude's start, brings the canvas back after a restart.
 const HOME = process.env.CANVAS_HOME || path.join(os.homedir(), '.canvas'), CONFIG = path.join(HOME, 'config.json');
+// The plugin this helper comes in (LOCAL-24), where a newer copy of it arrives (LOCAL-33).
+const PLUGIN = 'canvas-v2';
 const remembered = () => { try { return JSON.parse(fs.readFileSync(CONFIG, 'utf8')) || {}; } catch (e) { return {}; } }, saved = remembered();
 // This file's own fingerprint: an "up" from a newer helper replaces an older one still running.
 const VERSION = (() => { try { return createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex').slice(0, 12); } catch (e) { return 'dev'; } })();
@@ -1012,6 +1014,35 @@ else if (mode === 'up' || mode === 'daemon') {
       r.on('error', () => {}); r.setTimeout(10000, () => r.destroy());
     };
     look(); setInterval(look, Number(process.env.CANVAS_LOOK_MS) || 3000);
+    // LOCAL-33 (Emin, 22 Nov: "we need some sort of maybe update or something when new update come"): when the person's
+    // plugin brings a newer copy of this helper, the running one moves to it by itself, with nothing to click and nothing
+    // downloaded: the newest copy the plugin installed (as LOCAL-24 picks it) replaces this file, and its own "up" takes
+    // over (an older helper answering at the door gives way, LOCAL-13). Never onto an older copy, and never when this
+    // file is itself a plugin's.
+    const self = process.argv[1], roots = [path.join(os.homedir(), '.claude', 'plugins'), path.join(os.homedir(), '.codex', 'plugins', 'cache'), path.join(os.homedir(), '.codex', '.tmp', 'marketplaces')];
+    const quote = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+    let looked = '';
+    const update = () => {
+      if (process.platform === 'win32' || /[\\/]\.(claude|codex)[\\/]/.test(self)) return;
+      let out = '';
+      try { out = execSync('find ' + roots.map(quote).join(' ') + " -path '*/" + PLUGIN + "/*' -name helper.mjs -type f", { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000 }); } catch (e) { out = String(e.stdout || ''); }
+      let best = null;
+      for (const f of out.split('\n').filter(Boolean)) { try { const t = fs.statSync(f).mtimeMs; if (!best || t > best.t) best = { f, t }; } catch (e) {} }
+      let mine = 0; try { mine = fs.statSync(self).mtimeMs; } catch (e) { return; }
+      if (!best || best.t <= mine || looked === best.f + ':' + best.t) return;
+      looked = best.f + ':' + best.t;
+      let text; try { text = fs.readFileSync(best.f); } catch (e) { return; }
+      if (createHash('sha256').update(text).digest('hex').slice(0, 12) === VERSION) return; // the same helper, only newer on disk
+      const next = path.join(path.dirname(self), 'helper-next.mjs');
+      try {
+        fs.writeFileSync(next, text);
+        if (spawnSync(process.execPath, ['--check', next], { stdio: 'ignore' }).status !== 0) { fs.unlinkSync(next); return; }
+        fs.renameSync(next, self);
+      } catch (e) { try { fs.unlinkSync(next); } catch (x) {} return; }
+      spawn(process.execPath, [self, 'up', canvas], { detached: true, stdio: 'ignore' }).unref();
+    };
+    setTimeout(update, Number(process.env.CANVAS_UPDATE_FIRST_MS) || 20000);
+    setInterval(update, Number(process.env.CANVAS_UPDATE_MS) || 300000);
   }
 } else if (mode === 'codex-login') {
   // SAME-4: Codex's sign-in, kept waiting. "codex mcp login --no-browser" listens for Connect's answer, but also reads a
