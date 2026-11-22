@@ -667,6 +667,9 @@ function point() {
     if (!dz.texts.has(el)) dz.texts.set(el, el.textContent);
     dz.editing = el; dz.editFrom = el.textContent; dz.editNodes = [].slice.call(el.childNodes);
     el.setAttribute('contenteditable', 'plaintext-only'); if (el.contentEditable !== 'plaintext-only') el.setAttribute('contenteditable', 'true');
+    // The app's own focus ring would draw around the text being edited, inside our selection box: hide it until done.
+    dz.editOutline = [el.style.getPropertyValue('outline'), el.style.getPropertyPriority('outline')];
+    el.style.setProperty('outline', 'none', 'important');
     el.focus();
     try { var rg = document.createRange(); rg.selectNodeContents(el); var s = getSelection(); s.removeAllRanges(); s.addRange(rg); } catch (e) {}
     dzDraw();
@@ -676,6 +679,7 @@ function point() {
     dz.editing = null;
     var to = el.textContent;
     el.removeAttribute('contenteditable');
+    if (dz.editOutline) { if (dz.editOutline[0]) el.style.setProperty('outline', dz.editOutline[0], dz.editOutline[1]); else el.style.removeProperty('outline'); dz.editOutline = null; }
     // The app's own text nodes go back in place (a framework keeps them), holding the new words.
     while (el.firstChild) el.removeChild(el.firstChild);
     dz.editNodes.forEach(function (n) { el.appendChild(n); });
