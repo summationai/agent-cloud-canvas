@@ -187,7 +187,7 @@ function point() {
   var pinsSaid = '';
   function drawPins() {
     pinEls.forEach(function (d) { d.remove(); }); pinEls = [];
-    var spots = {};
+    var spots = {}, taken = [], vw = document.documentElement.clientWidth || innerWidth, vh = document.documentElement.clientHeight || innerHeight;
     pins.forEach(function (p) {
       var el = null; try { el = p.selector ? document.querySelector(p.selector) : null; } catch (x) {}
       if (!el) return;
@@ -202,8 +202,14 @@ function point() {
       var d = document.createElement('button');
       d.setAttribute('data-canvas-ui', '');
       d.textContent = p.n; d.title = p.text;
-      d.style.cssText = 'position:fixed;z-index:2147483646;left:' + Math.max(2, r.right - 12) + 'px;top:' + Math.max(2, r.top - 12) + 'px;width:22px;height:22px;border-radius:11px 11px 11px 3px;border:2px solid #fff;background:' + (p.done ? '#16A34A' : '#3B82F6') + ';color:#fff;font:600 11px/18px system-ui,sans-serif;padding:0;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.25)';
-      var at = { x: Math.max(2, r.right - 12), y: Math.max(2, r.top - 12) }; // ASK-23: its thread opens beside it
+      // ASK-28 (Emin, 23 Nov: "cant see actually comment numbers in full screen mode"): a pin stays whole inside the view
+      // (an element as wide as the page put it half past the right edge), and pins on the same spot step left, so each
+      // number shows.
+      var px = Math.min(Math.max(2, r.right - 12), vw - 26), py = Math.min(Math.max(2, r.top - 12), vh - 26);
+      while (px > 2 && taken.some(function (q) { return Math.abs(q.x - px) < 22 && Math.abs(q.y - py) < 22; })) px = Math.max(2, px - 26);
+      taken.push({ x: px, y: py });
+      d.style.cssText = 'position:fixed;z-index:2147483646;left:' + px + 'px;top:' + py + 'px;width:22px;height:22px;border-radius:11px 11px 11px 3px;border:2px solid #fff;background:' + (p.done ? '#16A34A' : '#3B82F6') + ';color:#fff;font:600 11px/18px system-ui,sans-serif;padding:0;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.25)';
+      var at = { x: px, y: py }; // ASK-23: its thread opens beside it
       spots[p.id] = at;
       d.onclick = function (e) { e.preventDefault(); e.stopPropagation(); post({ type: 'pin', id: p.id, at: at }); };
       document.documentElement.appendChild(d); pinEls.push(d);
@@ -966,6 +972,16 @@ function point() {
     if (d.type === 'design-keydown' && typeof d.key === 'string') dzKeys({ key: d.key, shiftKey: !!d.shift, metaKey: false, ctrlKey: false, preventDefault: function () {}, stopPropagation: function () {} });
     if (d.type === 'design-parent' && dz.sel && dz.sel !== document.body && dz.sel.parentElement) dzSelect(dz.sel.parentElement, true);
   });
+  (function(send){if(window.top===window)return;var last='',t=0;
+function measure(){var de=document.documentElement,b=document.body;if(!b)return null;var vh=innerHeight,sh=Math.max(de.scrollHeight,b.scrollHeight),y=scrollY||0,nat=0,inner=0;
+[].forEach.call(b.children,function(c){if(/^(SCRIPT|STYLE|LINK|TEMPLATE)$/.test(c.tagName))return;var s=getComputedStyle(c);if(s.position==='fixed'||s.display==='none')return;var r=c.getBoundingClientRect();if(r.height>0)nat=Math.max(nat,r.bottom+y+(parseFloat(s.marginBottom)||0));});
+var bs=getComputedStyle(b);nat=Math.ceil(nat+(parseFloat(bs.paddingBottom)||0)+(parseFloat(bs.borderBottomWidth)||0)+(parseFloat(bs.marginBottom)||0));
+if(sh<=vh+1){var all=b.getElementsByTagName('*');if(all.length<4000)for(var i=0;i<all.length;i++){var e=all[i];if(e.clientHeight>vh*0.5&&e.scrollHeight>e.clientHeight+1){var o=getComputedStyle(e).overflowY;if(o==='auto'||o==='scroll')inner=Math.max(inner,e.scrollHeight-e.clientHeight);}}}
+return{sh:sh,vh:vh,nat:nat,inner:inner};}
+function go(){t=0;var m=measure();if(!m)return;var k=m.sh+'|'+m.vh+'|'+m.nat+'|'+m.inner;if(k===last)return;last=k;send(m);}
+function soon(){if(!t)t=setTimeout(go,150);}
+function watch(){if(window.ResizeObserver){var ro=new ResizeObserver(soon);ro.observe(document.documentElement);ro.observe(document.body);}soon();}
+if(document.body)watch();else addEventListener('DOMContentLoaded',watch);addEventListener('load',soon);addEventListener('resize',soon);setInterval(soon,1500);})(function (m) { m.type = 'height'; post(m); }); // FRAME-17
   post({ type: 'ready', path: location.pathname, design: 1 }); // DESIGN-6: this page can do Design
   hist();
 }
@@ -1269,7 +1285,9 @@ else if (mode === 'up' || mode === 'daemon') {
     const look = () => {
       const run = Object.values(agentBins()).some(Boolean) ? '&run=1' : '';
       const r = lib.get(canvas + '/api/helper/apps?k=' + encodeURIComponent(keyOf()) + '&v=' + VERSION + run, (res) => { let b = ''; res.setEncoding('utf8'); res.on('data', (d) => { b += d; }); res.on('end', () => {
-        try { const j = JSON.parse(b); for (const port of j.ports || []) if (!started.has(port)) { started.add(port); startApp(port, ownOf(port), true); } update(j.helper); for (const a of j.asks || []) runAsk(a, j.plugin); } catch (e) {}
+        // A port it can't take yet (an older helper still holds it) is tried again on the next look, never given up on
+        // (Emin, 23 Nov: card B "not loading at all": 48088 was busy once at start, and never opened after).
+        try { const j = JSON.parse(b); for (const port of j.ports || []) if (!started.has(port)) { started.add(port); startApp(port, ownOf(port), () => started.delete(port)); } update(j.helper); for (const a of j.asks || []) runAsk(a, j.plugin); } catch (e) {}
       }); });
       r.on('error', () => {}); r.setTimeout(10000, () => r.destroy());
     };
