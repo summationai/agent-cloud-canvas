@@ -76,7 +76,7 @@ const openLink = (req, res, page, link) => {
 function point() {
   if (window.top === window || window.__canvasPoint) return;
   window.__canvasPoint = 1;
-  var picking = false, box = null, pins = [], pinEls = [];
+  var picking = false, free = false, box = null, pins = [], pinEls = [];
   function post(m) { parent.postMessage(Object.assign({ canvas: 1 }, m), '*'); }
   function esc(v) { return window.CSS && CSS.escape ? CSS.escape(v) : v.replace(/[^a-zA-Z0-9_-]/g, '\\$&'); }
   function selOf(el) {
@@ -98,13 +98,48 @@ function point() {
     var r = el.getBoundingClientRect();
     box.style.display = 'block'; box.style.left = (r.left - 2) + 'px'; box.style.top = (r.top - 2) + 'px'; box.style.width = (r.width + 4) + 'px'; box.style.height = (r.height + 4) + 'px';
   }
-  function stop() { picking = false; if (box) box.style.display = 'none'; document.documentElement.style.cursor = ''; }
-  addEventListener('mousemove', function (e) { if (picking && e.target && e.target !== box && !ui(e.target)) outline(e.target); }, true);
+  // ASK-26 (Emin, 23 Nov: "change also cursor to comment icon"): while commenting, a speech bubble whose tip is the spot,
+  // over everything in the app (its links and buttons keep their own cursors otherwise).
+  var cmt = null, CMT = 'url(data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M2 22V12a10 10 0 1 1 10 10z" fill="#fff" stroke="#111" stroke-width="1.5" stroke-linejoin="round"/></svg>') + ') 2 22, crosshair';
+  function cmtCursor(on) {
+    if (on && !cmt) { cmt = document.createElement('style'); cmt.setAttribute('data-canvas-ui', ''); cmt.textContent = 'html,html *{cursor:' + CMT + '!important}'; document.documentElement.appendChild(cmt); }
+    if (!on && cmt) { cmt.remove(); cmt = null; }
+  }
+  // ASK-26 (Emin, 23 Nov: "cuz of the responsive the comment pin also move which could be confusing"): a comment hangs
+  // on content, never on the page or a block as big as it: what was clicked, or the content it's in, or else the content
+  // nearest the spot on screen (text, a picture, a control). Its pin keeps its distance from that content's corner.
+  var CONTENT = /^(IMG|BUTTON|A|INPUT|TEXTAREA|SELECT|SVG|VIDEO|CANVAS|PICTURE|LABEL|H[1-6]|P|LI|TD|TH)$/;
+  function own(el) { for (var n = el.firstChild; n; n = n.nextSibling) if (n.nodeType === 3 && n.nodeValue.trim()) return true; return false; }
+  function isContent(el) { return !!el && el.nodeType === 1 && !ui(el) && (CONTENT.test(String(el.tagName).toUpperCase()) || own(el)); }
+  function anchorAt(x, y, el) {
+    var W = innerWidth, H = innerHeight, big = W * H * 0.25;
+    for (var e = el; e && e !== document.body && e !== document.documentElement; e = e.parentElement) {
+      if (isContent(e)) { var q0 = e.getBoundingClientRect(); if (q0.width * q0.height < big) return e; break; }
+    }
+    var best = null, bd = Infinity, ba = Infinity, all = document.body ? document.body.getElementsByTagName('*') : [];
+    for (var i = 0; i < all.length && i < 5000; i++) {
+      var c = all[i]; if (!isContent(c)) continue;
+      var q = c.getBoundingClientRect(), ar = q.width * q.height;
+      if (!ar || ar >= big || q.bottom < 0 || q.top > H || q.right < 0 || q.left > W) continue;
+      var dx = Math.max(q.left - x, 0, x - q.right), dy = Math.max(q.top - y, 0, y - q.bottom), d = dx * dx + dy * dy;
+      if (d < bd || (d === bd && ar < ba)) { bd = d; ba = ar; best = c; }
+    }
+    return best || el;
+  }
+  function stop() { picking = false; if (box) box.style.display = 'none'; document.documentElement.style.cursor = ''; cmtCursor(false); }
+  addEventListener('mousemove', function (e) { if (picking && !free && e.target && e.target !== box && !ui(e.target)) outline(e.target); }, true);
   addEventListener('click', function (e) {
     if (!picking || ui(e.target)) return;
     e.preventDefault(); e.stopPropagation();
     var el = e.target, r = el.getBoundingClientRect();
     stop();
+    // ASK-26: a comment goes anywhere: no outline while pointing, and the spot clicked, not the element's corner.
+    if (free) {
+      free = false;
+      var a = anchorAt(e.clientX, e.clientY, el), ar = a.getBoundingClientRect();
+      post({ type: 'picked', free: true, selector: selOf(a), label: labelOf(a), path: location.pathname + location.hash, rect: { x: ar.left, y: ar.top, w: ar.width, h: ar.height }, at: { x: e.clientX, y: e.clientY }, vw: innerWidth });
+      return;
+    }
     var shot = 'p' + Date.now().toString(36);
     post({ type: 'picked', selector: selOf(el), label: labelOf(el), path: location.pathname + location.hash, rect: { x: r.left, y: r.top, w: r.width, h: r.height }, shot: shot });
     capture(r).then(function (url) { post({ type: 'shot', id: shot, url: url }); }, function () { post({ type: 'shot', id: shot, url: null }); });
@@ -143,7 +178,12 @@ function point() {
       return o.toDataURL('image/jpeg', 0.82);
     });
   }
-  addEventListener('keydown', function (e) { if (picking && e.key === 'Escape') { stop(); post({ type: 'pick-cancel' }); } }, true);
+  addEventListener('keydown', function (e) {
+    if (picking && e.key === 'Escape') { stop(); post({ type: 'pick-cancel' }); }
+    // ASK-26: C, as on the canvas, starts or stops commenting, unless it's typed into the app.
+    var t = e.target, typing = t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ''));
+    if ((e.key === 'c' || e.key === 'C') && !e.metaKey && !e.ctrlKey && !e.altKey && !typing) post({ type: 'key', key: 'c' });
+  }, true);
   var pinsSaid = '';
   function drawPins() {
     pinEls.forEach(function (d) { d.remove(); }); pinEls = [];
@@ -152,6 +192,13 @@ function point() {
       var el = null; try { el = p.selector ? document.querySelector(p.selector) : null; } catch (x) {}
       if (!el) return;
       var r = el.getBoundingClientRect(); if (!r.width && !r.height) return;
+      // ASK-26: a comment's spot is where in its element it was clicked (fx, fy); the canvas draws its pin over the app, so
+      // the page only says where it is, while it's in view.
+      if ((typeof p.ox === 'number' && typeof p.oy === 'number') || (typeof p.fx === 'number' && typeof p.fy === 'number')) {
+        var cx = typeof p.ox === 'number' ? r.left + p.ox : r.left + p.fx * r.width, cy = typeof p.oy === 'number' ? r.top + p.oy : r.top + p.fy * r.height;
+        if (cx >= 0 && cy >= 0 && cx <= innerWidth && cy <= innerHeight) spots[p.id] = { x: cx, y: cy };
+        if (p.hide) return;
+      }
       var d = document.createElement('button');
       d.setAttribute('data-canvas-ui', '');
       d.textContent = p.n; d.title = p.text;
@@ -344,11 +391,22 @@ function point() {
   addEventListener('scroll', function () { for (var n in bars) { drawVersions(); return; } }, true);
   addEventListener('resize', drawVersions);
   addEventListener('load', soon); addEventListener('input', soon, true); addEventListener('scroll', function () {}, true);
+  // ASK-25 (Emin, 23 Nov: "can we add here back and previous buttons? to go previous pages?"): Back and Forward on the
+  // full view's bar step through this frame's own pages only (the Navigation API's entries are this frame's, never the
+  // canvas's: history.back() here could take the canvas itself back). The bar hears whether each can go, as it changes.
+  var nav = window.navigation;
+  function hist() { if (nav) post({ type: 'hist', back: !!nav.canGoBack, fwd: !!nav.canGoForward }); }
+  if (nav) nav.addEventListener('currententrychange', hist);
+  addEventListener('pageshow', hist);
   addEventListener('message', function (e) {
     if (e.source !== parent) return;
     var d = e.data || {}; if (d.canvas !== 1) return;
+    if (d.type === 'hist') hist();
+    if (d.type === 'go' && nav && (d.by === -1 ? nav.canGoBack : d.by === 1 && nav.canGoForward)) {
+      try { var g = d.by === -1 ? nav.back() : nav.forward(); g.committed.catch(function () {}); g.finished.catch(function () {}); } catch (x) {}
+    }
     if (d.type === 'live') { var was = live; live = !!d.on; if (live && !was) soon(); }
-    if (d.type === 'pick') { picking = !!d.on; document.documentElement.style.cursor = picking ? 'crosshair' : ''; if (!picking) stop(); }
+    if (d.type === 'pick') { picking = !!d.on; free = picking && d.how === 'free'; if (free && box) box.style.display = 'none'; document.documentElement.style.cursor = picking ? 'crosshair' : ''; cmtCursor(free); if (!picking) stop(); }
     if (d.type === 'pins') { pins = d.pins || []; drawPins(); }
   });
   addEventListener('scroll', function () { if (pins.length) drawPins(); }, true);
@@ -472,19 +530,43 @@ function point() {
   function dzSkip(el) { return ui(el) || /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|LINK|META|HEAD|TITLE|BR)$/.test(el.tagName); }
   function dzPlain(el) { if (!el.childNodes.length) return false; for (var i = 0; i < el.childNodes.length; i++) if (el.childNodes[i].nodeType !== 3) return false; return /\S/.test(el.textContent || ''); }
   function dzOwnText(el) { for (var i = 0; i < el.childNodes.length; i++) { var n = el.childNodes[i]; if (n.nodeType === 3 && /\S/.test(n.data)) return true; } return false; }
+  // DESIGN-13 (Emin, 23 Nov: "I cant edit title in design mode"): a text with a line break or a styled run in it (a
+  // heading's <br>, its grey <span>) is one text, as a Figma text layer is: edited whole, its markup kept.
+  var INLINE = /^(SPAN|BR|WBR|A|EM|STRONG|B|I|U|S|SMALL|MARK|CODE|KBD|SAMP|VAR|SUB|SUP|ABBR|TIME|Q|CITE|DFN|DEL|INS|BDI|BDO)$/;
+  function dzRich(el) {
+    if (el === document.body || !/\S/.test(el.textContent || '') || /flex|grid/.test(getComputedStyle(el).display)) return false;
+    var all = el.getElementsByTagName('*'); if (!all.length) return false;
+    for (var i = 0; i < all.length; i++) {
+      var c = all[i];
+      if (!INLINE.test(c.tagName) || ui(c)) return false;
+      if (c.tagName !== 'BR' && c.tagName !== 'WBR' && !/^inline(-block)?$/.test(getComputedStyle(c).display)) return false;
+    }
+    return true;
+  }
+  function dzText(el) { return !!el && (dzPlain(el) || dzRich(el)); }
+  // The text a double-click lands in: a run inside a text (the heading's grey span) edits the whole text.
+  function dzTextOf(t) {
+    var best = dzText(t) ? t : null;
+    for (var c = t; c && INLINE.test(c.tagName) && c.parentElement && dzRich(c.parentElement); c = c.parentElement) best = c.parentElement;
+    return best;
+  }
+  function dzRuns(el) { var out = [], w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), n; while ((n = w.nextNode())) out.push(n); return out; }
+  function dzSnap(el) { return dzRuns(el).map(function (n) { return [n, n.data]; }); }
+  // What a person reads, for the change list and the agent: a <br> is a new line.
+  function dzWords(el) { var s = ''; [].forEach.call(el.childNodes, function (n) { s += n.nodeType === 3 ? n.data : n.nodeType !== 1 ? '' : n.tagName === 'BR' ? '\n' : dzWords(n); }); return s; }
   function dzKind(el) {
     var tag = el.tagName.toLowerCase(), cs = getComputedStyle(el);
     if (/^(img|picture|video|canvas|iframe)$/.test(tag)) return 'image';
     if (tag === 'svg') return 'vector';
     if (/flex/.test(cs.display)) return /column/.test(cs.flexDirection) ? 'col' : 'row';
     if (/grid/.test(cs.display)) return 'grid';
-    if (dzPlain(el)) return 'text';
+    if (dzText(el)) return 'text';
     return 'frame';
   }
   var NICE = { main: 'Main', header: 'Header', nav: 'Nav', footer: 'Footer', section: 'Section', aside: 'Aside', form: 'Form', ul: 'List', ol: 'List', li: 'Item', img: 'Image', svg: 'Icon', table: 'Table', textarea: 'Text area', select: 'Select', input: 'Input', article: 'Article', button: 'Button', a: 'Link', label: 'Label', body: 'Page' };
   function dzName(el) {
     var tag = el.tagName.toLowerCase(), k = dzKind(el);
-    if (k === 'text') return (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    if (k === 'text') return dzWords(el).replace(/\s+/g, ' ').trim().slice(0, 40);
     var a = el.getAttribute('aria-label') || el.getAttribute('alt') || el.getAttribute('placeholder') || el.getAttribute('title');
     if (a) return a.replace(/\s+/g, ' ').trim().slice(0, 40);
     if (NICE[tag]) return NICE[tag];
@@ -570,7 +652,7 @@ function point() {
     var cls = (typeof el.className === 'string' ? el.className : (el.className && el.className.baseVal) || '').trim().split(/\s+/).filter(Boolean).slice(0, 6).join('.');
     return {
       sel: dzPath(el), name: dzName(el), desc: dzDesc(el), kind: dzKind(el), tag: el.tagName.toLowerCase(), cls: cls, body: el === document.body,
-      text: dzPlain(el) ? (el.textContent || '').slice(0, 300) : null,
+      text: dzText(el) ? (el.textContent || '').slice(0, 300) : null,
       w: Math.round(r.width * 10) / 10, h: Math.round(r.height * 10) / 10, wMode: mode(true), hMode: mode(false),
       parent: pflex ? (prow ? 'row' : 'col') : pcs && /grid/.test(pcs.display) ? 'grid' : 'block', abs: abs,
       display: cs.display, flex: flex ? { dir: row ? 'row' : 'col', wrap: cs.flexWrap === 'wrap', gap: gap, jc: cs.justifyContent, ai: cs.alignItems } : null,
@@ -658,30 +740,48 @@ function point() {
     }
     dz.root.innerHTML = html;
   }
-  function dzSetText(el, t) {
-    var ns = [].filter.call(el.childNodes, function (n) { return n.nodeType === 3; });
+  // The new words go into the app's own text nodes (a framework keeps them): run by run when each run's words are known,
+  // else the changed stretch into the run where it starts, cut from the runs it spans.
+  function dzSetText(el, t, parts) {
+    var ns = dzRuns(el);
     if (!ns.length) { el.appendChild(document.createTextNode(t)); return; }
-    ns.forEach(function (n, i) { n.data = i === 0 ? t : ''; });
+    if (parts && parts.length === ns.length) { ns.forEach(function (n, i) { if (n.data !== parts[i]) n.data = parts[i]; }); return; }
+    var old = ns.map(function (n) { return n.data; }).join('');
+    if (old === t) return;
+    var a = 0, m = Math.min(old.length, t.length), b = 0;
+    while (a < m && old.charCodeAt(a) === t.charCodeAt(a)) a++;
+    while (b < m - a && old.charCodeAt(old.length - 1 - b) === t.charCodeAt(t.length - 1 - b)) b++;
+    var end = old.length - b, put = t.slice(a, t.length - b), at = [], pos = 0, home = 0;
+    ns.forEach(function (n) { at.push(pos); pos += n.data.length; });
+    // An insertion right at a boundary goes on the run before it.
+    for (var i = 0; i < ns.length; i++) { var s = at[i], e = s + ns[i].data.length; if (end > a ? s <= a && a < e : s < a && a <= e) { home = i; break; } }
+    ns.forEach(function (n, i) {
+      var s = at[i], d = n.data, e = s + d.length;
+      if (i === home) n.data = d.slice(0, Math.max(0, a - s)) + put + d.slice(Math.max(0, Math.min(end, e) - s));
+      else if (Math.max(a, s) < Math.min(end, e)) n.data = d.slice(0, Math.max(a, s) - s) + d.slice(Math.min(end, e) - s);
+    });
   }
   function dzApply(list) {
     dz.orig.forEach(function (o) { if (o.style === null) o.el.removeAttribute('style'); else o.el.setAttribute('style', o.style); });
     dz.orig = [];
-    dz.texts.forEach(function (t, el) { dzSetText(el, t); });
+    dz.texts.forEach(function (runs) { runs.forEach(function (r) { r[0].data = r[1]; }); });
     dz.texts = new Map();
     (list || []).forEach(function (c) {
       var el = null; try { el = document.querySelector(c.sel); } catch (e) {}
       if (!el || ui(el)) return;
       if (!dz.orig.some(function (o) { return o.el === el; })) dz.orig.push({ el: el, style: el.getAttribute('style') });
       for (var p in c.props || {}) if (typeof c.props[p] === 'string') el.style.setProperty(p, c.props[p], 'important');
-      if (typeof c.text === 'string' && dzPlain(el)) { if (!dz.texts.has(el)) dz.texts.set(el, el.textContent); dzSetText(el, c.text); }
+      if (typeof c.text === 'string' && dzText(el)) { if (!dz.texts.has(el)) dz.texts.set(el, dzSnap(el)); dzSetText(el, c.text, Array.isArray(c.parts) ? c.parts : null); }
     });
     dz.n = (list || []).length;
     dzSend(); dzTreeSoon();
   }
   function dzEdit(el) {
-    if (!el || !dzPlain(el)) return;
-    if (!dz.texts.has(el)) dz.texts.set(el, el.textContent);
-    dz.editing = el; dz.editFrom = el.textContent; dz.editNodes = [].slice.call(el.childNodes);
+    if (!dzText(el)) return;
+    if (!dz.texts.has(el)) dz.texts.set(el, dzSnap(el));
+    dz.editing = el; dz.editFrom = el.textContent; dz.editWords = dzWords(el); dz.editRuns = dzSnap(el);
+    // Every node inside as it was: typing over a styled run can drop it, and the app's framework keeps these very nodes.
+    dz.editTree = [el].concat([].slice.call(el.getElementsByTagName('*'))).map(function (x) { return [x, [].slice.call(x.childNodes)]; });
     el.setAttribute('contenteditable', 'plaintext-only'); if (el.contentEditable !== 'plaintext-only') el.setAttribute('contenteditable', 'true');
     // The app's own focus ring would draw around the text being edited, inside our selection box: hide it until done.
     dz.editOutline = [el.style.getPropertyValue('outline'), el.style.getPropertyPriority('outline')];
@@ -693,15 +793,17 @@ function point() {
   function dzEndEdit(cancel) {
     var el = dz.editing; if (!el) return;
     dz.editing = null;
-    var to = el.textContent;
+    var to = el.textContent, runs = dz.editRuns, now = dzRuns(el);
+    // Typed within its runs, each run keeps its own words; a run typed over goes back by the words alone.
+    var parts = now.length === runs.length && now.every(function (n, i) { return n === runs[i][0]; }) ? now.map(function (n) { return n.data; }) : null;
     el.removeAttribute('contenteditable');
     if (dz.editOutline) { if (dz.editOutline[0]) el.style.setProperty('outline', dz.editOutline[0], dz.editOutline[1]); else el.style.removeProperty('outline'); dz.editOutline = null; }
-    // The app's own text nodes go back in place (a framework keeps them), holding the new words.
-    while (el.firstChild) el.removeChild(el.firstChild);
-    dz.editNodes.forEach(function (n) { el.appendChild(n); });
-    dzSetText(el, cancel ? dz.editFrom : to);
+    // The app's own nodes go back in place (a framework keeps them), holding the new words.
+    dz.editTree.forEach(function (x) { var p = x[0]; while (p.firstChild) p.removeChild(p.firstChild); x[1].forEach(function (n) { p.appendChild(n); }); });
+    runs.forEach(function (r) { r[0].data = r[1]; });
+    if (!cancel) dzSetText(el, to, parts);
     try { getSelection().removeAllRanges(); } catch (e) {}
-    if (!cancel && to !== dz.editFrom) post({ type: 'design-change', sel: dzPath(el), label: dzDesc(el), field: 'text', from: dz.editFrom, to: to, text: to });
+    if (!cancel && to !== dz.editFrom) post({ type: 'design-change', sel: dzPath(el), label: dzDesc(el), field: 'text', from: dz.editWords.trim(), to: dzWords(el).trim(), text: to, parts: runs.map(function (r) { return r[0].data; }) });
     dzDraw();
   }
   function dzKids(p) {
@@ -825,7 +927,7 @@ function point() {
   addEventListener('dblclick', function (e) {
     if (dzMine(e)) return;
     e.preventDefault(); e.stopPropagation();
-    var t = dzTarget(e.target); if (t && dzPlain(t)) { dzSelect(t); dzEdit(t); }
+    var t = dzTextOf(dzTarget(e.target)); if (t) { dzSelect(t); dzEdit(t); }
   }, true);
   addEventListener('keydown', dzKeys, true);
   function dzKeys(e) {
@@ -838,7 +940,7 @@ function point() {
     if (mod) return;
     if (k === 'Escape') { e.preventDefault(); if (el && el !== document.body && el.parentElement) dzSelect(el.parentElement, true); else dzSelect(null); return; }
     if (!el) return;
-    if (k === 'Enter') { e.preventDefault(); if (dzPlain(el)) dzEdit(el); else { var first = dzKids(el)[0]; if (first) dzSelect(first, true); } return; }
+    if (k === 'Enter') { e.preventDefault(); if (dzText(el)) dzEdit(el); else { var first = dzKids(el)[0]; if (first) dzSelect(first, true); } return; }
     if (k === 'Tab') { e.preventDefault(); var p = el.parentElement; if (!p) return; var ks = dzKids(p), i = ks.indexOf(el), nx = ks[(i + (e.shiftKey ? -1 : 1) + ks.length) % ks.length]; if (nx) dzSelect(nx, true); return; }
     if (k === 'Backspace' || k === 'Delete') { e.preventDefault(); (dz.multi.length > 1 ? dz.multi : [el]).forEach(function (m) { if (m !== document.body) post({ type: 'design-change', sel: dzPath(m), label: dzDesc(m), field: 'remove', from: 'shown', to: 'removed', set: { display: 'none' } }); }); return; }
     if (/^Arrow(Up|Left)$/.test(k)) { e.preventDefault(); if (dz.multi.length < 2) dzMove(-1); return; }
@@ -865,6 +967,7 @@ function point() {
     if (d.type === 'design-parent' && dz.sel && dz.sel !== document.body && dz.sel.parentElement) dzSelect(dz.sel.parentElement, true);
   });
   post({ type: 'ready', path: location.pathname, design: 1 }); // DESIGN-6: this page can do Design
+  hist();
 }
 
 const POINT = '(' + point.toString() + ')();';
@@ -1095,9 +1198,78 @@ else if (mode === 'up' || mode === 'daemon') {
       });
       r.on('error', fail); r.setTimeout(15000, () => r.destroy());
     };
+    // ASK-24 (docs/asks.md; Emin, 23 Nov: Save in Chrome said "Queued for your agent" and nothing came): an ask saved on
+    // the canvas while no chat watches it goes to the person's own agent here, with no chat. Claude Code (the desktop
+    // app's own copy when there's no claude command), or Codex for a card Codex showed, runs in the folder the app's dev
+    // server runs from: it may change files there and answer on the canvas, nothing more. One at a time, each ask tried
+    // once, given back to the canvas if its agent ended without answering. What it said goes to ~/.canvas/agent.log.
+    const runnable = (f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile(); } catch (e) { return false; } };
+    const onPath = (name) => String(process.env.PATH || '').split(path.delimiter).concat([path.join(os.homedir(), '.local', 'bin'), path.join(os.homedir(), '.claude', 'local'), '/opt/homebrew/bin', '/usr/local/bin'])
+      .map((d) => d && path.join(d, name)).find((f) => f && runnable(f)) || '';
+    const desktop = () => { // the Claude app's Claude Code, newest first
+      const root = path.join(os.homedir(), 'Library', 'Application Support', 'Claude', 'claude-code'), found = [];
+      try { for (const v of fs.readdirSync(root)) for (const h of fs.readdirSync(path.join(root, v))) { const f = path.join(root, v, h, 'claude.app', 'Contents', 'MacOS', 'claude'); if (runnable(f)) found.push([fs.statSync(f).mtimeMs, f]); } } catch (e) {}
+      return (found.sort((a, b) => b[0] - a[0])[0] || [])[1] || '';
+    };
+    let bins = null, binsAt = 0;
+    const agentBins = () => {
+      if (process.platform === 'win32') return {};
+      if (!bins || Date.now() - binsAt > 60000) { bins = { claude: onPath('claude') || desktop() || (runnable(String(process.env.CLAUDE_CODE_EXECPATH || '')) ? process.env.CLAUDE_CODE_EXECPATH : ''), codex: onPath('codex') }; binsAt = Date.now(); }
+      return bins;
+    };
+    const quiet = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 };
+    const folderOf = (port) => { // the folder the process serving the app runs from
+      try {
+        const pid = execSync('lsof -nP -iTCP:' + Number(port) + ' -sTCP:LISTEN -t', quiet).trim().split('\n')[0];
+        if (!/^\d+$/.test(pid) || Number(pid) === process.pid) return '';
+        const d = process.platform === 'linux' ? fs.readlinkSync('/proc/' + pid + '/cwd') : ((/^n(\/.*)$/m.exec(execSync('lsof -a -p ' + pid + ' -d cwd -Fn', quiet)) || [])[1] || '');
+        return d && d !== '/' && d !== os.homedir() && fs.statSync(d).isDirectory() ? d : '';
+      } catch (e) { return ''; }
+    };
+    const tell = (body, then) => {
+      const data = JSON.stringify(body);
+      const r = lib.request(canvas + '/api/helper/ask', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } }, (res) => {
+        let b = ''; res.setEncoding('utf8'); res.on('data', (d) => { b += d; }); res.on('end', () => { let j = null; try { j = JSON.parse(b); } catch (e) {} then(res.statusCode, j); });
+      });
+      r.on('error', () => then(0, null)); r.setTimeout(15000, () => r.destroy()); r.end(data);
+    };
+    const tried = new Set();
+    let busy = false;
+    const runAsk = (a, plugin) => {
+      if (busy || !a || typeof a.id !== 'string' || tried.has(a.id)) return;
+      tried.add(a.id); if (tried.size > 1000) tried.delete(tried.values().next().value);
+      const b = agentBins(), bin = (a.agent === 'codex' && b.codex) || b.claude || b.codex, dir = bin ? folderOf(a.port) : '';
+      if (!dir) return;
+      busy = true;
+      tell({ k: keyOf(), ask: a.id, take: true }, (status, j) => {
+        if (status !== 200 || !j || typeof j.text !== 'string') { busy = false; return; }
+        const codex = path.basename(bin) === 'codex';
+        const tools = ['mcp__plugin_' + (/^[a-z0-9-]{1,40}$/.test(String(plugin)) ? plugin : 'canvas') + '_canvas', 'mcp__canvas', 'Bash(git diff:*)', 'Bash(git status:*)'];
+        const args = codex ? ['exec', '--sandbox', 'workspace-write', '--skip-git-repo-check', '-'] : ['-p', '--permission-mode', 'acceptEdits', '--allowedTools', tools.join(',')];
+        const env = Object.assign({}, process.env); delete env.CLAUDECODE; delete env.CLAUDE_CODE_ENTRYPOINT;
+        let out = 'ignore';
+        try {
+          fs.mkdirSync(HOME, { recursive: true, mode: 0o700 });
+          const f = path.join(HOME, 'agent.log'); try { if (fs.statSync(f).size > 1000000) fs.truncateSync(f, 0); } catch (e) {}
+          out = fs.openSync(f, 'a', 0o600); fs.writeSync(out, '\n--- ' + new Date().toISOString() + ' ask ' + a.id + ' in ' + dir + ' with ' + path.basename(bin) + '\n');
+        } catch (e) {}
+        let ended = false, stop = null;
+        const end = () => {
+          if (ended) return; ended = true; clearTimeout(stop); busy = false;
+          if (typeof out === 'number') try { fs.closeSync(out); } catch (e) {}
+          tell({ k: keyOf(), ask: a.id, take: false }, () => {}); // a no-op once it's answered
+        };
+        let child;
+        try { child = spawn(bin, args, { cwd: dir, env, stdio: ['pipe', out, out] }); } catch (e) { return end(); }
+        stop = setTimeout(() => child.kill(), 15 * 60000);
+        child.on('error', end); child.on('exit', end);
+        child.stdin.on('error', () => {}); child.stdin.end(j.text);
+      });
+    };
     const look = () => {
-      const r = lib.get(canvas + '/api/helper/apps?k=' + encodeURIComponent(keyOf()) + '&v=' + VERSION, (res) => { let b = ''; res.setEncoding('utf8'); res.on('data', (d) => { b += d; }); res.on('end', () => {
-        try { const j = JSON.parse(b); for (const port of j.ports || []) if (!started.has(port)) { started.add(port); startApp(port, ownOf(port), true); } update(j.helper); } catch (e) {}
+      const run = Object.values(agentBins()).some(Boolean) ? '&run=1' : '';
+      const r = lib.get(canvas + '/api/helper/apps?k=' + encodeURIComponent(keyOf()) + '&v=' + VERSION + run, (res) => { let b = ''; res.setEncoding('utf8'); res.on('data', (d) => { b += d; }); res.on('end', () => {
+        try { const j = JSON.parse(b); for (const port of j.ports || []) if (!started.has(port)) { started.add(port); startApp(port, ownOf(port), true); } update(j.helper); for (const a of j.asks || []) runAsk(a, j.plugin); } catch (e) {}
       }); });
       r.on('error', () => {}); r.setTimeout(10000, () => r.destroy());
     };
