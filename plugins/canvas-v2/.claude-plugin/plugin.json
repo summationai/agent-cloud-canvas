@@ -1,6 +1,6 @@
 {
   "name": "canvas-v2",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "description": "Your apps on a canvas beside the chat: /canvas puts the app you are working on there, live from your machine, and your own Claude or Codex builds new versions with you.",
   "author": {
     "name": "agent.cloud"

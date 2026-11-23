@@ -23,8 +23,6 @@ const DOOR = Number(process.env.CANVAS_DOOR_PORT) || 47777, door = 'http://local
 // LOCAL-14: "up" with a canvas and key remembers them here (only this person can read it), so "up" alone, from
 // Claude's start, brings the canvas back after a restart.
 const HOME = process.env.CANVAS_HOME || path.join(os.homedir(), '.canvas'), CONFIG = path.join(HOME, 'config.json');
-// The plugin this helper comes in (LOCAL-24), where a newer copy of it arrives (LOCAL-33).
-const PLUGIN = 'canvas-v2';
 const remembered = () => { try { return JSON.parse(fs.readFileSync(CONFIG, 'utf8')) || {}; } catch (e) { return {}; } }, saved = remembered();
 // This file's own fingerprint: an "up" from a newer helper replaces an older one still running.
 const VERSION = (() => { try { return createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex').slice(0, 12); } catch (e) { return 'dev'; } })();
@@ -54,6 +52,24 @@ if (!/^https:\/\/[a-z0-9.-]+$|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(c
 const fromAny = (req, origins, framed) => { const site = req.headers['sec-fetch-site'], from = String(req.headers.origin || req.headers.referer || '');
   return !site || site === 'same-origin' || site === 'none' || origins.some((o) => from === o || from.startsWith(o + '/'))
     || (framed && req.method === 'GET' && req.headers['sec-fetch-dest'] === 'iframe' && req.headers['sec-fetch-mode'] === 'navigate'); };
+
+// HANDOFF-7, HANDOFF-9 (docs/handoff.md): a sign-in page beside the chat, the door's or an app's in its card, opens its
+// /auth/go/<code> link in the person's usual browser, so they never copy it. Only that page may ask, and only for that one
+// kind of link.
+const openLink = (req, res, page, link) => {
+  if (!fromAny(req, [page])) { res.writeHead(403); res.end(); return; }
+  let b = ''; req.setEncoding('utf8'); req.on('data', (d) => { if (b.length < 2000) b += d; });
+  req.on('end', () => {
+    let to = ''; try { to = String(JSON.parse(b).url || ''); } catch (e) {}
+    if (!link.test(to)) { res.writeHead(400); res.end(); return; }
+    let sent = false; const done = (ok) => { if (sent) return; sent = true; res.writeHead(ok ? 200 : 502, { 'content-type': 'application/json' }); res.end(JSON.stringify({ opened: ok })); };
+    const [cmd, args] = process.env.CANVAS_OPEN_CMD ? [process.env.CANVAS_OPEN_CMD, [to]] : process.platform === 'darwin' ? ['open', [to]] : process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', to]] : ['xdg-open', [to]];
+    const o = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+    const t = setTimeout(() => { o.unref(); done(true); }, 3000);
+    o.on('error', () => { clearTimeout(t); done(false); });
+    o.on('exit', (code) => { clearTimeout(t); done(code === 0); });
+  });
+};
 
 // ASK-4: what the helper adds to the app's pages, and only inside the canvas's frame: point at something (the canvas
 // says when), and it tells the canvas what you pointed at; it draws the asks' pins on their elements.
@@ -889,23 +905,7 @@ function startDoor(soft) {
     if (req.url === '/__canvas/up') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('canvas-helper ' + VERSION + ' ' + canvas); return; }
     // Only an "up" holding the same key may stop it, to start a newer one.
     if (keyOf() && req.url === '/__canvas/quit?k=' + encodeURIComponent(keyOf())) { res.writeHead(200); res.end('bye'); setTimeout(() => process.exit(0), 50); return; }
-    // HANDOFF-7: the sign-in page beside the chat opens its /auth/go/<code> link in the person's usual browser, so they
-    // never copy it. Only the door's own page may ask, and only for that one kind of link.
-    if (req.method === 'POST' && req.url === '/__canvas/open') {
-      if (!fromAny(req, [door])) { res.writeHead(403); res.end(); return; }
-      let b = ''; req.setEncoding('utf8'); req.on('data', (d) => { if (b.length < 2000) b += d; });
-      req.on('end', () => {
-        let to = ''; try { to = String(JSON.parse(b).url || ''); } catch (e) {}
-        if (!/^https:\/\/[a-z0-9.-]+\/auth\/go\/[A-Z0-9-]{4,12}$/.test(to)) { res.writeHead(400); res.end(); return; }
-        const [cmd, args] = process.platform === 'darwin' ? ['open', [to]] : process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', to]] : ['xdg-open', [to]];
-        let sent = false; const done = (ok) => { if (sent) return; sent = true; res.writeHead(ok ? 200 : 502, { 'content-type': 'application/json' }); res.end(JSON.stringify({ opened: ok })); };
-        const o = spawn(cmd, args, { detached: true, stdio: 'ignore' });
-        const t = setTimeout(() => { o.unref(); done(true); }, 3000);
-        o.on('error', () => { clearTimeout(t); done(false); });
-        o.on('exit', (code) => { clearTimeout(t); done(code === 0); });
-      });
-      return;
-    }
+    if (req.method === 'POST' && req.url === '/__canvas/open') return openLink(req, res, door, /^https:\/\/[a-z0-9.-]+\/auth\/go\/[A-Z0-9-]{4,12}$/);
     door$(req, res);
   });
   const door$ = ((req, res) => {
@@ -977,6 +977,8 @@ function startApp(target, own, soft) {
   const server = http.createServer((req, res) => {
     if (!fromAny(req, [canvas, door], true)) { res.writeHead(403, { 'content-type': 'text/plain' }); res.end('Only the canvas can open this.'); return; }
     if (req.url === '/__canvas/point.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' }); res.end(POINT); return; }
+    // HANDOFF-9: the app's own sign-in in its card opens the app's /auth/go/<code> link in their usual browser, as the door does.
+    if (req.method === 'POST' && req.url === '/__canvas/open') return openLink(req, res, me, new RegExp('^http://(localhost|127\\.0\\.0\\.1):' + target + '/auth/go/[A-Z0-9-]{4,12}$'));
     // LOCAL-25: back from signing in, in the sign-in window (a page of its own, so its Lax cookies come with it): the
     // app's cookies again, now SameSite=None, so the card's frame gets them too; then the card reloads.
     if (req.url === '/__canvas/promote' && req.method === 'GET') {
@@ -1065,42 +1067,41 @@ else if (mode === 'up' || mode === 'daemon') {
     startDoor((e, again) => { if (e.code === 'EADDRINUSE' && ++tries < 25) setTimeout(again, 200); else process.exit(0); });
     // Every app on this person's canvases gets its card's helper, as it appears.
     const C = new URL(canvas), lib = C.protocol === 'https:' ? https : http, started = new Set();
+    // LOCAL-33 (Emin, 22 Nov: "every project should update plugin always? We did auto-update today"): the helper keeps
+    // itself current from its canvas, never waiting on the plugin, which Claude doesn't update by itself when it comes
+    // from another marketplace. Each look below brings the fingerprint of the helper the canvas serves; when it isn't
+    // this file's, the helper fetches /helper.mjs, checks it is that one and parses, puts it in place of its own file and
+    // runs its "up", which takes over (LOCAL-13). Never a file in a plugin's own folder.
+    const self = process.argv[1];
+    let fetching = '', failed = 0;
+    const update = (want) => {
+      if (typeof want !== 'string' || !/^[0-9a-f]{12}$/.test(want) || want === VERSION || VERSION === 'dev') return;
+      if (/[\\/]\.(claude|codex)[\\/]/.test(self) || fetching || Date.now() - failed < 60000) return;
+      fetching = want;
+      const fail = () => { fetching = ''; failed = Date.now(); };
+      const r = lib.get(canvas + '/helper.mjs?v=' + want, (res) => {
+        const parts = []; res.on('data', (d) => { parts.push(d); });
+        res.on('end', () => {
+          const text = Buffer.concat(parts);
+          if (res.statusCode !== 200 || createHash('sha256').update(text).digest('hex').slice(0, 12) !== want) return fail();
+          const next = path.join(path.dirname(self), 'helper-next.mjs');
+          try {
+            fs.writeFileSync(next, text);
+            if (spawnSync(process.execPath, ['--check', next], { stdio: 'ignore' }).status !== 0) { fs.unlinkSync(next); return fail(); }
+            fs.renameSync(next, self);
+          } catch (e) { try { fs.unlinkSync(next); } catch (x) {} return fail(); }
+          spawn(process.execPath, [self, 'up', canvas], { detached: true, stdio: 'ignore' }).unref();
+        });
+      });
+      r.on('error', fail); r.setTimeout(15000, () => r.destroy());
+    };
     const look = () => {
-      const r = lib.get(canvas + '/api/helper/apps?k=' + encodeURIComponent(keyOf()), (res) => { let b = ''; res.setEncoding('utf8'); res.on('data', (d) => { b += d; }); res.on('end', () => {
-        try { for (const port of JSON.parse(b).ports || []) if (!started.has(port)) { started.add(port); startApp(port, ownOf(port), true); } } catch (e) {}
+      const r = lib.get(canvas + '/api/helper/apps?k=' + encodeURIComponent(keyOf()) + '&v=' + VERSION, (res) => { let b = ''; res.setEncoding('utf8'); res.on('data', (d) => { b += d; }); res.on('end', () => {
+        try { const j = JSON.parse(b); for (const port of j.ports || []) if (!started.has(port)) { started.add(port); startApp(port, ownOf(port), true); } update(j.helper); } catch (e) {}
       }); });
       r.on('error', () => {}); r.setTimeout(10000, () => r.destroy());
     };
     look(); setInterval(look, Number(process.env.CANVAS_LOOK_MS) || 3000);
-    // LOCAL-33 (Emin, 22 Nov: "we need some sort of maybe update or something when new update come"): when the person's
-    // plugin brings a newer copy of this helper, the running one moves to it by itself, with nothing to click and nothing
-    // downloaded: the newest copy the plugin installed (as LOCAL-24 picks it) replaces this file, and its own "up" takes
-    // over (an older helper answering at the door gives way, LOCAL-13). Never onto an older copy, and never when this
-    // file is itself a plugin's.
-    const self = process.argv[1], roots = [path.join(os.homedir(), '.claude', 'plugins'), path.join(os.homedir(), '.codex', 'plugins', 'cache'), path.join(os.homedir(), '.codex', '.tmp', 'marketplaces')];
-    const quote = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
-    let looked = '';
-    const update = () => {
-      if (process.platform === 'win32' || /[\\/]\.(claude|codex)[\\/]/.test(self)) return;
-      let out = '';
-      try { out = execSync('find ' + roots.map(quote).join(' ') + " -path '*/" + PLUGIN + "/*' -name helper.mjs -type f", { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000 }); } catch (e) { out = String(e.stdout || ''); }
-      let best = null;
-      for (const f of out.split('\n').filter(Boolean)) { try { const t = fs.statSync(f).mtimeMs; if (!best || t > best.t) best = { f, t }; } catch (e) {} }
-      let mine = 0; try { mine = fs.statSync(self).mtimeMs; } catch (e) { return; }
-      if (!best || best.t <= mine || looked === best.f + ':' + best.t) return;
-      looked = best.f + ':' + best.t;
-      let text; try { text = fs.readFileSync(best.f); } catch (e) { return; }
-      if (createHash('sha256').update(text).digest('hex').slice(0, 12) === VERSION) return; // the same helper, only newer on disk
-      const next = path.join(path.dirname(self), 'helper-next.mjs');
-      try {
-        fs.writeFileSync(next, text);
-        if (spawnSync(process.execPath, ['--check', next], { stdio: 'ignore' }).status !== 0) { fs.unlinkSync(next); return; }
-        fs.renameSync(next, self);
-      } catch (e) { try { fs.unlinkSync(next); } catch (x) {} return; }
-      spawn(process.execPath, [self, 'up', canvas], { detached: true, stdio: 'ignore' }).unref();
-    };
-    setTimeout(update, Number(process.env.CANVAS_UPDATE_FIRST_MS) || 20000);
-    setInterval(update, Number(process.env.CANVAS_UPDATE_MS) || 300000);
   }
 } else if (mode === 'codex-login') {
   // SAME-4: Codex's sign-in, kept waiting. "codex mcp login --no-browser" listens for Connect's answer, but also reads a
