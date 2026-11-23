@@ -1087,6 +1087,28 @@ const SIGNIN = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name=
   + '};'
   + 'addEventListener("message", function (e) { if (e.origin === location.origin && e.data && e.data.canvasSignedIn) location.replace(back); });'
   + '})();</script></html>';
+// LOCAL-35 (Emin, 23 Nov 2026: a card said only "Your app at http://localhost:8085 is not answering. Start it, then
+// reload."): what a card shows when nothing answers on its app's port. Its button asks the person's agent, through the
+// canvas, to start the app again; the page looks every 2 s and loads the app the moment it answers.
+const STOPPED = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>App stopped</title>'
+  + '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font:15px/1.5 system-ui,-apple-system,sans-serif;color:#111;background:#fff}'
+  + 'main{max-width:360px;padding:24px;text-align:center}h1{font-size:18px;margin:0}p{color:#555;margin:8px 0 18px}code{font:13px ui-monospace,Menlo,monospace;color:#111}'
+  + '.dot{display:inline-block;width:8px;height:8px;margin:0 8px 2px 0;border-radius:50%;background:#D4D4D4;vertical-align:middle}'
+  + 'button{font:inherit;font-weight:600;padding:10px 18px;border:0;border-radius:8px;background:#111;color:#fff;cursor:pointer}button:focus-visible{outline:2px solid #3B82F6;outline-offset:2px}'
+  + 'button:disabled{background:#EDEDED;color:#6D6D6D;cursor:default}</style>'
+  + '<main><h1><span class="dot" aria-hidden="true"></span>This app has stopped</h1><p id="say" role="status">Nothing answers at <code>localhost:__PORT__</code>. This card comes back by itself once it’s running.</p>'
+  + '<button id="go" type="button">Ask your agent to start it</button></main>'
+  + '<script>(function () {'
+  + 'var go = document.getElementById("go"), say = document.getElementById("say"), K = "canvas-start-asked", wait = 0;'
+  + 'function asked() { go.disabled = true; go.textContent = "Asked"; say.textContent = "Your agent is starting it. This card comes back by itself."; }'
+  + 'function failed() { clearTimeout(wait); go.disabled = false; say.textContent = "Couldn’t reach your agent. Try again."; }'
+  + 'if (window.top === window) go.hidden = true;'
+  + 'try { if (Date.now() - Number(sessionStorage.getItem(K) || 0) < 300000) asked(); } catch (e) {}'
+  + 'go.onclick = function () { go.disabled = true; parent.postMessage({ canvas: 1, type: "start" }, "*"); wait = setTimeout(failed, 8000); };'
+  + 'addEventListener("message", function (e) { var d = e.data || {}; if (e.source !== parent || d.canvas !== 1 || d.type !== "start-asked") return;'
+  + '  if (!d.ok) return failed(); clearTimeout(wait); try { sessionStorage.setItem(K, String(Date.now())); } catch (x) {} asked(); });'
+  + 'setInterval(function () { fetch("/__canvas/alive", { cache: "no-store" }).then(function (r) { if (r.status === 204) { try { sessionStorage.removeItem(K); } catch (x) {} location.reload(); } }, function () {}); }, 2000);'
+  + '})();</script></html>';
 function startApp(target, own, soft) {
 
   let me = 'http://localhost:' + own;
@@ -1106,6 +1128,13 @@ function startApp(target, own, soft) {
         'set-cookie': jar.map((c) => c + '; Path=/; Max-Age=86400; SameSite=None; Secure') });
       res.end('<!doctype html><meta charset="utf-8"><title>Signed in</title><p style="font:15px system-ui,sans-serif;text-align:center;margin-top:40vh">Signed in. You can close this window.</p>'
         + '<script>try { opener && opener.postMessage({ canvasSignedIn: 1 }, location.origin); } catch (e) {} setTimeout(function () { window.close(); }, 300);</script>');
+      return;
+    }
+    // LOCAL-35: whether the app answers again, for its stopped page: 204 once something listens on its port.
+    if (req.url === '/__canvas/alive') {
+      const s = net.connect(target, 'localhost');
+      const done = (ok) => { s.destroy(); if (!res.headersSent) { res.writeHead(ok ? 204 : 503, { 'cache-control': 'no-store' }); res.end(); } };
+      s.once('connect', () => done(true)); s.once('error', () => done(false)); s.setTimeout(1500, () => done(false));
       return;
     }
     const headers = { ...req.headers, host: 'localhost:' + target };
@@ -1141,7 +1170,14 @@ function startApp(target, own, soft) {
         res.end(i >= 0 ? page.slice(0, page.indexOf('>', i) + 1) + tag + page.slice(page.indexOf('>', i) + 1) : tag + page);
       });
     });
-    up.on('error', () => { if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' }); res.end('Your app at http://localhost:' + target + ' is not answering. Start it, then reload.'); });
+    up.on('error', () => {
+      if (res.headersSent) { res.end(); return; }
+      // LOCAL-35: a page load gets a page that says the app stopped, asks the agent to start it, and comes back by itself.
+      const page = req.method === 'GET' && (/^(iframe|document)$/.test(String(req.headers['sec-fetch-dest'] || '')) || /text\/html/.test(String(req.headers.accept || '')));
+      if (!page) { res.writeHead(502, { 'content-type': 'text/plain' }); res.end('Your app at http://localhost:' + target + ' is not answering.'); return; }
+      res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': own$ });
+      res.end(STOPPED.replace('__PORT__', String(target)));
+    });
     req.pipe(up);
   });
   // Live reload (Vite, Next and the like) talks over a WebSocket: pass it straight through.
